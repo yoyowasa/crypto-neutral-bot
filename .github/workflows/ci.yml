@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4  # リポジトリの内容を取得
+
+      - name: Set up Python 3.11
+        id: setup-python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'poetry'  # 依存キャッシュキーに poetry.lock を使う
+
+      # Poetry を確実に PATH に通してインストール（PATH問題の恒久対策）
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: "2.0.1"           # package-mode=false を理解する 2.x を明示
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      # setup-python が提供した実体の Python を venv に紐付け（3.11固定）
+      - name: Poetry use runner Python
+        run: |
+          poetry env use "${{ steps.setup-python.outputs.python-path }}"
+          poetry --version
+          poetry config --list
+
+      - name: Cache .venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-
+
+      - name: Install dependencies
+        run: |
+          poetry install --no-interaction --no-root  # package-mode=false なので依存だけ入れる
+
+      - name: Lint (ruff)
+        run: poetry run ruff check .
+
+      - name: Format check (black)
+        run: poetry run black --check .
+
+      - name: Type check (mypy)
+        run: poetry run mypy bot --ignore-missing-imports
+
+      - name: Run tests (pytest)
+        run: poetry run pytest -q
