@@ -1,0 +1,21 @@
+exchange:
+  name: bybit
+  environment: testnet
+  recv_window_ms: 5000
+
+risk:
+  max_total_notional_usdt: 50000
+  max_symbol_notional_usdt: 25000
+  max_net_delta_bps: 20
+  max_slippage_bps: 10
+  loss_cut_daily_usdt: 1000
+
+strategy:
+  symbols: ["BTCUSDT", "ETHUSDT"]
+  min_expected_apr: 0.05
+  pre_event_open_minutes: 60
+  hold_across_events: true
+  rebalance_band_bps: 5.0
+
+db_url: "sqlite+aiosqlite:///./db/trading.db"
+timezone: "UTC"
