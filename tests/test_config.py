@@ -1,6 +1,4 @@
 from __future__ import annotations
-import os
-from pathlib import Path
 from bot.config.loader import load_config
 
 def test_load_config_env_overrides(tmp_path, monkeypatch):
