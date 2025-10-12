@@ -10,6 +10,7 @@ from pydantic_settings import SettingsConfigDict
 
 from .models import AppConfig
 
+
 SettingsSource = Callable[[], dict[str, Any]]
 
 try:
@@ -19,6 +20,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 
 
 def make_yaml_source(yaml_path: Path) -> SettingsSource:
+
     """
     YAML を読み取り dict を返す関数ソース(引数なし)を生成。
     後ろに置くほど優先度が低くなる(先に並べたソースが勝つ)。
@@ -56,7 +58,7 @@ def load_config(config_path: str | None = None) -> AppConfig:
 
         @classmethod
         def settings_customise_sources(
-            cls,
+
             settings_cls: type[AppConfig],  # v2 では最初に settings_cls が来る
             init_settings: SettingsSource,
             env_settings: SettingsSource,
@@ -64,6 +66,7 @@ def load_config(config_path: str | None = None) -> AppConfig:
             file_secret_settings: SettingsSource,
         ) -> tuple[SettingsSource, ...]:
             # YAML は最後(最低優先)に追加
+
             yaml_source = make_yaml_source(yaml_path)
             return (
                 init_settings,
@@ -73,7 +76,9 @@ def load_config(config_path: str | None = None) -> AppConfig:
                 yaml_source,
             )
 
-    return _AppConfig()
+    # BaseSettings は内部で設定ソースを解決するため、引数なしでの生成を許容する。
+    return _AppConfig()  # type: ignore[call-arg]
+
 
 
 def redact_secrets(cfg: AppConfig) -> dict:

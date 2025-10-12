@@ -1,9 +1,11 @@
 import sys
 
+
 from loguru import logger
 
 
 def main() -> None:
+
     logger.info("OK: python={}, venv={}", sys.version, sys.prefix)
 
 

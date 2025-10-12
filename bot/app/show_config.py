@@ -10,6 +10,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config", type=str, default=None, help="YAML設定ファイルのパス(省略可)"
+
     )
     args = parser.parse_args()
 
