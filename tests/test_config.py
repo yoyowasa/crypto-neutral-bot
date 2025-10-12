@@ -10,6 +10,7 @@ from bot.config.loader import load_config
 def test_load_config_env_overrides(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+
     # 一時YAML
     yaml_text = """
 exchange:

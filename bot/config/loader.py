@@ -64,6 +64,7 @@ def load_config(config_path: str | None = None) -> AppConfig:
             file_secret_settings: SettingsSource,
         ) -> tuple[SettingsSource, ...]:
             # YAML は最後(最低優先)に追加
+
             yaml_source = make_yaml_source(yaml_path)
             return (
                 init_settings,
@@ -73,7 +74,9 @@ def load_config(config_path: str | None = None) -> AppConfig:
                 yaml_source,
             )
 
-    return _AppConfig()
+    # BaseSettings は内部で設定ソースを解決するため、引数なしでの生成を許容する。
+    return _AppConfig()  # type: ignore[call-arg]
+
 
 
 def redact_secrets(cfg: AppConfig) -> dict:

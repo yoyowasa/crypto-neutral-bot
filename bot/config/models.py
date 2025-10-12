@@ -23,6 +23,7 @@ class RiskConfig(BaseModel):
     max_symbol_notional_usdt: float
     max_net_delta_bps: float  # ネットデルタの許容帯(bps)
     max_slippage_bps: float  # 片道スリッページ上限(bps)
+
     loss_cut_daily_usdt: float  # 日次損失の停止閾値
 
 
