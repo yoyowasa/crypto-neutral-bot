@@ -1,0 +1,9 @@
+pytest
+pytest-asyncio
+ruff
+black
+mypy
+PyYAML
+types-PyYAML
+pydantic
+pydantic-settings
