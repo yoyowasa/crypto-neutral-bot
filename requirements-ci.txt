@@ -5,3 +5,5 @@ black
 mypy
 PyYAML
 types-PyYAML
+pydantic
+pydantic-settings
