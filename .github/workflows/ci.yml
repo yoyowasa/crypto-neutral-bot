@@ -16,53 +16,30 @@ permissions:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
-        uses: actions/checkout@v4  # リポジトリの内容を取得
+        uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        id: setup-python
+      - name: Set up Python 3.11 (with pip cache)
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'poetry'  # 依存キャッシュキーに poetry.lock を使う
+          cache: 'pip'
+          cache-dependency-path: requirements-ci.txt
 
-      # Poetry を確実に PATH に通してインストール（PATH問題の恒久対策）
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
-        with:
-          version: "2.0.1"           # package-mode=false を理解する 2.x を明示
-          virtualenvs-create: true
-          virtualenvs-in-project: true
-
-      # setup-python が提供した実体の Python を venv に紐付け（3.11固定）
-      - name: Poetry use runner Python
+      - name: Install dev dependencies (pip)
         run: |
-          poetry env use "${{ steps.setup-python.outputs.python-path }}"
-          poetry --version
-          poetry config --list
-
-      - name: Cache .venv
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('poetry.lock') }}
-          restore-keys: |
-            venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-
-
-      - name: Install dependencies
-        run: |
-          poetry install --no-interaction --no-root  # package-mode=false なので依存だけ入れる
+          python -m pip install --upgrade pip
+          pip install -r requirements-ci.txt
 
       - name: Lint (ruff)
-        run: poetry run ruff check .
+        run: ruff check .
 
       - name: Format check (black)
-        run: poetry run black --check .
+        run: black --check .
 
       - name: Type check (mypy)
-        run: poetry run mypy bot --ignore-missing-imports
+        run: mypy bot --ignore-missing-imports
 
       - name: Run tests (pytest)
-        run: poetry run pytest -q
+        run: pytest -q
