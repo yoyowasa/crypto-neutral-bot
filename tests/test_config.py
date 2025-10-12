@@ -1,11 +1,11 @@
 from __future__ import annotations
-import os
-from pathlib import Path
+
 from bot.config.loader import load_config
+
 
 def test_load_config_env_overrides(tmp_path, monkeypatch):
     # 一時YAML
-    yaml_text = '''
+    yaml_text = """
 exchange:
   environment: testnet
 risk:
@@ -14,7 +14,7 @@ risk:
   max_net_delta_bps: 20
   max_slippage_bps: 10
   loss_cut_daily_usdt: 50
-'''
+"""
     p = tmp_path / "app.yaml"
     p.write_text(yaml_text, encoding="utf-8")
 
