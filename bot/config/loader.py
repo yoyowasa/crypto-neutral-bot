@@ -1,15 +1,27 @@
 from __future__ import annotations
-from pathlib import Path
+
 import os
-import yaml
-from typing import Any, Callable
+from collections.abc import Callable
+from importlib import import_module
+from pathlib import Path
+from typing import Any, cast
+
 from pydantic_settings import SettingsConfigDict
+
 from .models import AppConfig
 
-def make_yaml_source(yaml_path: Path) -> Callable[[], dict[str, Any]]:
+SettingsSource = Callable[[], dict[str, Any]]
+
+try:
+    yaml = cast(Any, import_module("yaml"))
+except ModuleNotFoundError as exc:  # pragma: no cover
+    raise RuntimeError("PyYAML is required to load configuration") from exc
+
+
+def make_yaml_source(yaml_path: Path) -> SettingsSource:
     """
-    YAML を読み取り dict を返す関数ソース（引数なし）を生成。
-    後ろに置くほど優先度が低くなる（先に並べたソースが勝つ）。
+    YAML を読み取り dict を返す関数ソース(引数なし)を生成。
+    後ろに置くほど優先度が低くなる(先に並べたソースが勝つ)。
     """
     path = Path(yaml_path)
 
@@ -23,12 +35,17 @@ def make_yaml_source(yaml_path: Path) -> Callable[[], dict[str, Any]]:
 
     return _source
 
+
 def load_config(config_path: str | None = None) -> AppConfig:
     """
     優先順位: init引数 > 環境変数 > .env > YAML(最低)
     config_path 未指定時は APP_CONFIG or 'config/app.yaml'
     """
-    yaml_path = Path(config_path) if config_path else Path(os.environ.get("APP_CONFIG", "config/app.yaml"))
+    yaml_path = (
+        Path(config_path)
+        if config_path
+        else Path(os.environ.get("APP_CONFIG", "config/app.yaml"))
+    )
 
     class _AppConfig(AppConfig):
         model_config = SettingsConfigDict(
@@ -40,13 +57,13 @@ def load_config(config_path: str | None = None) -> AppConfig:
         @classmethod
         def settings_customise_sources(
             cls,
-            settings_cls,      # v2 では最初に settings_cls が来る
-            init_settings,
-            env_settings,
-            dotenv_settings,
-            file_secret_settings,
-        ):
-            # YAML は最後（最低優先）に追加
+            settings_cls: type[AppConfig],  # v2 では最初に settings_cls が来る
+            init_settings: SettingsSource,
+            env_settings: SettingsSource,
+            dotenv_settings: SettingsSource,
+            file_secret_settings: SettingsSource,
+        ) -> tuple[SettingsSource, ...]:
+            # YAML は最後(最低優先)に追加
             yaml_source = make_yaml_source(yaml_path)
             return (
                 init_settings,
@@ -57,6 +74,7 @@ def load_config(config_path: str | None = None) -> AppConfig:
             )
 
     return _AppConfig()
+
 
 def redact_secrets(cfg: AppConfig) -> dict:
     d = cfg.model_dump()
