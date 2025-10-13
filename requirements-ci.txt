@@ -7,3 +7,5 @@ PyYAML
 types-PyYAML
 pydantic
 pydantic-settings
+loguru
+tenacity
