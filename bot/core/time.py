@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 import asyncio
 import time as _time
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 
 def utc_now() -> datetime:
     "UTC の timezone-aware datetime を返す"
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def to_tz(dt: datetime, tz: str) -> datetime:
-    "任意の IANA TZ へ変換（例: 'UTC', 'Asia/Tokyo'）"
+    "任意の IANA TZ へ変換(例: 'UTC', 'Asia/Tokyo')"
     return dt.astimezone(ZoneInfo(tz))
 
 
@@ -25,8 +25,8 @@ async def sleep_until(dt_utc: datetime) -> None:
 
 
 def monotonic_ms() -> int:
-    "モノトニック時計（ms）"
+    "モノトニック時計(ms)"
     return int(_time.monotonic() * 1000)
 
 
-__all__ = ["utc_now", "to_tz", "sleep_until", "monotonic_ms"]
+__all__ = ["monotonic_ms", "sleep_until", "to_tz", "utc_now"]

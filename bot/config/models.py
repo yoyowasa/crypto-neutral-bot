@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -17,11 +18,11 @@ class ExchangeConfig(BaseModel):
 
 
 class RiskConfig(BaseModel):
-    # いずれも USDT（クォート）換算
+    # いずれも USDT(クォート)換算
     max_total_notional_usdt: float
     max_symbol_notional_usdt: float
-    max_net_delta_bps: float  # ネットデルタの許容帯（bps）
-    max_slippage_bps: float  # 片道スリッページ上限（bps）
+    max_net_delta_bps: float  # ネットデルタの許容帯(bps)
+    max_slippage_bps: float  # 片道スリッページ上限(bps)
     loss_cut_daily_usdt: float  # 日次損失の停止閾値
 
 

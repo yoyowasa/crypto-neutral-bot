@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from bot.config.loader import load_config
 
 

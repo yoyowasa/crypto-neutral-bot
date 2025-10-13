@@ -1,13 +1,15 @@
 from __future__ import annotations
+
 import argparse
 import json
+
 from bot.config.loader import load_config, redact_secrets
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--config", type=str, default=None, help="YAML設定ファイルのパス（省略可）"
+        "--config", type=str, default=None, help="YAML設定ファイルのパス(省略可)"
     )
     args = parser.parse_args()
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
-from loguru import logger
 import sys
+from pathlib import Path
+
+from loguru import logger
 
 
 def setup_logging(
@@ -39,4 +40,4 @@ def setup_logging(
     )
 
 
-__all__ = ["setup_logging", "logger"]
+__all__ = ["logger", "setup_logging"]

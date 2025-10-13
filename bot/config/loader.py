@@ -1,16 +1,20 @@
 from __future__ import annotations
-from pathlib import Path
+
 import os
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
 import yaml
-from typing import Any, Callable
 from pydantic_settings import SettingsConfigDict
+
 from .models import AppConfig
 
 
 def make_yaml_source(yaml_path: Path) -> Callable[[], dict[str, Any]]:
     """
-    YAML を読み取り dict を返す関数ソース（引数なし）を生成。
-    後ろに置くほど優先度が低くなる（先に並べたソースが勝つ）。
+    YAML を読み取り dict を返す関数ソース(引数なし)を生成。
+    後ろに置くほど優先度が低くなる(先に並べたソースが勝つ)。
     """
     path = Path(yaml_path)
 
@@ -52,7 +56,7 @@ def load_config(config_path: str | None = None) -> AppConfig:
             dotenv_settings,
             file_secret_settings,
         ):
-            # YAML は最後（最低優先）に追加
+            # YAML は最後(最低優先)に追加
             yaml_source = make_yaml_source(yaml_path)
             return (
                 init_settings,

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from bot.core.logging import setup_logging, logger
-from bot.core.time import utc_now, sleep_until, monotonic_ms
+
+from bot.core.logging import logger, setup_logging
 from bot.core.retry import retryable
+from bot.core.time import monotonic_ms, sleep_until, utc_now
 
 
 @retryable(attempts=3)
