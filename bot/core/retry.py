@@ -2,13 +2,21 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 # import に httpx が無い環境でも壊れないようにオプショナル扱い
 try:
     import httpx  # type: ignore
 
-    _HTTPX_ERRORS: tuple[type[BaseException], ...] = (httpx.ConnectError, httpx.ReadTimeout)
+    _HTTPX_ERRORS: tuple[type[BaseException], ...] = (
+        httpx.ConnectError,
+        httpx.ReadTimeout,
+    )
 except Exception:  # pragma: no cover
     _HTTPX_ERRORS = ()
 
