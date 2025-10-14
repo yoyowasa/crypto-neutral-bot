@@ -1,5 +1,12 @@
 from __future__ import annotations
-from bot.config.loader import load_config
+
+import importlib
+
+import pytest
+
+pytest.importorskip("yaml")
+
+load_config = importlib.import_module("bot.config.loader").load_config
 
 
 def test_load_config_env_overrides(tmp_path, monkeypatch):

@@ -1,9 +1,12 @@
 from __future__ import annotations
-from pathlib import Path
+
 import os
-import yaml  # type: ignore[import-untyped]
+from pathlib import Path
 from typing import Any, Callable
+
+import yaml  # type: ignore[import-untyped]
 from pydantic_settings import SettingsConfigDict
+
 from .models import AppConfig
 
 
