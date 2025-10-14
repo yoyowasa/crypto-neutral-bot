@@ -20,7 +20,9 @@ polars = "^1.6.0"                                    # 高速データフレー�
 python-dotenv = "^1.0.1"                             # .env ロード補助
 ccxt = "^4.3.0"                                      # 取引所RESTラッパ（Bybit代替手段）
 pybit = "*"                                          # TODO: v5対応版の正式パッケージ名・バージョンは要確認
+
 PyYAML = "^6.0.2"                                    # YAML 読み込み用ライブラリ
+
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.1"            # テスト実行
@@ -46,10 +48,9 @@ target-version = ["py311"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-exclude = ["db/**"]            # 生成物等は除外可
 
-[tool.ruff.lint]
 select = ["E", "F", "I", "B"]  # 基本のエラー/フォーマット/インポート順/バグベア
+exclude = ["db/**"]            # 生成物等は除外可
 
 [tool.mypy]
 python_version = "3.11"

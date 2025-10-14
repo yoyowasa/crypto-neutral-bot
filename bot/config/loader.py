@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+
 from typing import Any, MutableMapping
 
 try:
@@ -15,6 +16,7 @@ except ImportError:  # pragma: no cover - 実行時に例外へ委譲
 
 # YAMLを読むための外部ライブラリ（PyYAML が無い場合は load_config 内で例外を出す）
 from dotenv import find_dotenv, load_dotenv  # .env を環境変数に反映
+
 
 from .models import AppConfig
 
@@ -89,3 +91,4 @@ def redact_secrets(cfg: AppConfig) -> dict[str, Any]:
     if "keys" in dumped:
         dumped["keys"] = {"api_key": "***", "api_secret": "***"}
     return dumped
+
