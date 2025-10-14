@@ -11,6 +11,7 @@ from typing import Any, MutableMapping
 import yaml  # type: ignore[import-untyped]  # YAMLを読むための外部ライブラリ
 from dotenv import find_dotenv, load_dotenv  # .env を環境変数に反映
 
+
 from .models import AppConfig
 
 
@@ -80,3 +81,4 @@ def redact_secrets(cfg: AppConfig) -> dict[str, Any]:
     if "keys" in dumped:
         dumped["keys"] = {"api_key": "***", "api_secret": "***"}
     return dumped
+
