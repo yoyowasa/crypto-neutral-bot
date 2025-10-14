@@ -1,47 +1,57 @@
-[project]
-name = "crypto-neutral-bot"
-version = "0.1.0"
-description = ""
-authors = [
-    {name = "Yoshi",email = "yoshiyoshi@example.com"}
-]
-readme = "README.md"
-requires-python = ">=3.11"
-dependencies = [
-    "httpx[http2] (>=0.28.1,<0.29.0)",
-    "websockets (>=15.0.1,<16.0.0)",
-    "pydantic (>=2.12.0,<3.0.0)",
-    "pydantic-settings (>=2.11.0,<3.0.0)",
-    "loguru (>=0.7.3,<0.8.0)",
-    "tenacity (>=9.1.2,<10.0.0)",
-    "sqlalchemy (>=2.0.43,<3.0.0)",
-    "aiosqlite (>=0.21.0,<0.22.0)",
-    "pandas (>=2.3.3,<3.0.0)",
-    "polars (>=1.34.0,<2.0.0)",
-    "python-dotenv (>=1.1.1,<2.0.0)",
-    "PyYAML (>=6.0.2,<7.0.0)",
-    "ccxt (>=4.5.8,<5.0.0)"
-]
-
-
-[build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
-
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.4.2"
-pytest-asyncio = "^1.2.0"
-ruff = "^0.14.0"
-black = "^25.9.0"
-mypy = "^1.18.2"
-pre-commit = "^4.3.0"
-
-[tool.poetry.dependencies]
-python = ">=3.11,<3.12"
-
 [tool.poetry]
 name = "crypto-neutral-bot"
 version = "0.1.0"
 description = ""
 authors = []
-package-mode = false   # ← これを追加
+packages = [{ include = "bot" }]  # プロダクトのPythonパッケージは 'bot' ディレクトリ配下にあることを宣言
+
+[tool.poetry.dependencies]
+python = "^3.11"
+httpx = { extras = ["http2"], version = "^0.27.0" }  # RESTクライアント（HTTP/2対応）
+websockets = "^12.0"                                 # WebSocketクライアント
+pydantic = "^2.7.0"                                  # 型付きデータモデル
+pydantic-settings = "^2.4.0"                         # .env/YAML等から設定読取
+loguru = "^0.7.2"                                    # ロギング
+tenacity = "^8.3.0"                                  # 再試行（指数バックオフ）
+sqlalchemy = "^2.0.30"                               # ORM/スキーマ
+aiosqlite = "^0.20.0"                                # 非同期SQLiteドライバ
+pandas = "^2.2.2"                                    # 分析・集計（最小限）
+polars = "^1.6.0"                                    # 高速データフレーム（任意利用）
+python-dotenv = "^1.0.1"                             # .env ロード補助
+ccxt = "^4.3.0"                                      # 取引所RESTラッパ（Bybit代替手段）
+pybit = "*"                                          # TODO: v5対応版の正式パッケージ名・バージョンは要確認
+pyyaml = "^6.0.2"                                    # YAML読取（設定ファイル）
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.2.1"            # テスト実行
+pytest-asyncio = "^0.23.7"   # 非同期テスト
+ruff = "^0.5.7"              # Linter（高速）
+black = "^24.8.0"            # フォーマッタ
+mypy = "^1.10.0"             # 型検査
+pre-commit = "^3.7.1"        # コミット時の自動チェック
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+select = ["E", "F", "I", "B"]  # 基本のエラー/フォーマット/インポート順/バグベア
+exclude = ["db/**"]            # 生成物等は除外可
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+ignore_missing_imports = true   # サードパーティ型定義が無い場合でも通す（MVP段階）
+no_implicit_optional = true
+pretty = true

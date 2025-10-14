@@ -1,7 +1,3 @@
-from __future__ import annotations
-
-__all__ = ["version_info"]
-
-
-def version_info() -> str:
-    return "0.1.0"
+"""bot パッケージのルート。
+このプロジェクトの全コードを 'bot' 配下にまとめ、Poetry から import できるようにする。
+"""
