@@ -1,73 +1,91 @@
+"""設定ローダ。
+このファイルは「.env と YAML を読み込み、環境変数優先でマージして AppConfig を返す」ことをする。
+"""
+
 from __future__ import annotations
-from pathlib import Path
+
 import os
-import yaml  # type: ignore[import-untyped]
-from typing import Any, Callable
-from pydantic_settings import SettingsConfigDict
+from pathlib import Path
+from typing import Any, MutableMapping
+
+try:
+    import yaml  # type: ignore[import-untyped]
+except ImportError:  # pragma: no cover - 実行時に例外へ委譲
+    yaml = None
+
+# YAMLを読むための外部ライブラリ（PyYAML が無い場合は load_config 内で例外を出す）
+from dotenv import find_dotenv, load_dotenv  # .env を環境変数に反映
+
 from .models import AppConfig
 
 
-def make_yaml_source(yaml_path: Path) -> Callable[[], dict[str, Any]]:
-    """
-    YAML を読み取り dict を返す関数ソース（引数なし）を生成。
-    後ろに置くほど優先度が低くなる（先に並べたソースが勝つ）。
-    """
-    path = Path(yaml_path)
+def _deep_set(dic: MutableMapping[str, Any], path: list[str], value: Any) -> None:
+    """何をする関数：'A__B__C' のようなENVキーをネストdictに差し込む（小文字キー前提）"""
 
-    def _source() -> dict[str, Any]:
-        if not path.exists():
-            return {}
+    cur = dic
+    for key in path[:-1]:
+        if key not in cur or not isinstance(cur[key], dict):
+            cur[key] = {}
+        cur = cur[key]  # 次の階層へ潜る
+    cur[path[-1]] = value  # 最終キーに値を設定
+
+
+def _merge_env_over_yaml(base: dict[str, Any], env: dict[str, str]) -> dict[str, Any]:
+    """何をする関数：ENVの値をYAMLで読んだdictに上書きする（ENVが優先）"""
+
+    # 対象となるトップレベル名（AppConfig のフィールド名と合わせる）
+    allowed_roots = {"keys", "exchange", "risk", "strategy"}
+    out: dict[str, Any] = dict(base)  # まずYAMLの内容をコピー
+
+    for raw_key, val in env.items():
+        # 大文字ENVを小文字に変換し、__ でネストとみなす
+        key = raw_key.lower()
+        if "__" in key:
+            parts = key.split("__")
+            root = parts[0]
+            if root in allowed_roots:
+                _deep_set(out, parts, val)
+        elif key == "db_url":
+            out["db_url"] = val
+        elif key == "timezone":
+            out["timezone"] = val
+        # それ以外のENVは無視（extra="ignore" のため既知以外は落とす）
+    return out
+
+
+def load_config(config_path: str | Path | None = None) -> AppConfig:
+    """何をする関数：.env と YAML を読み込み、型検証した AppConfig を返す"""
+
+    # 1) .env を環境に取り込む（find_dotenv はCWDから上位を探索）
+    load_dotenv(find_dotenv(usecwd=True), override=False)
+
+    # 2) YAML 読み込み（無ければ空dict）
+    #    既定はプロジェクトルートの 'config/app.yaml' を想定
+    path = Path(config_path) if config_path is not None else Path("config/app.yaml")
+    yaml_data: dict[str, Any] = {}
+    if path.exists():
+        if yaml is None:
+            msg = "PyYAML がインストールされていないため YAML を読み込めません。"
+            raise RuntimeError(msg)
+
         with path.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        # AppConfig のフィールド(keys, exchange, risk, strategy, db_url, timezone)に対応
-        return data
+            loaded = yaml.safe_load(f)
+            if isinstance(loaded, dict):
+                # YAMLは小文字キーで書く前提（サンプルも小文字）
+                yaml_data = loaded
 
-    return _source
+    # 3) ENV で上書き（ENVがあれば優先）
+    merged = _merge_env_over_yaml(yaml_data, dict(os.environ))
 
-
-def load_config(config_path: str | None = None) -> AppConfig:
-    """
-    優先順位: init引数 > 環境変数 > .env > YAML(最低)
-    config_path 未指定時は APP_CONFIG or 'config/app.yaml'
-    """
-    yaml_path = (
-        Path(config_path)
-        if config_path
-        else Path(os.environ.get("APP_CONFIG", "config/app.yaml"))
-    )
-
-    class _AppConfig(AppConfig):
-        model_config = SettingsConfigDict(
-            env_file=".env",
-            env_nested_delimiter="__",
-            extra="ignore",
-        )
-
-        @classmethod
-        def settings_customise_sources(
-            cls,
-            settings_cls,  # v2 では最初に settings_cls が来る
-            init_settings,
-            env_settings,
-            dotenv_settings,
-            file_secret_settings,
-        ):
-            # YAML は最後（最低優先）に追加
-            yaml_source = make_yaml_source(yaml_path)
-            return (
-                init_settings,
-                env_settings,
-                dotenv_settings,
-                file_secret_settings,
-                yaml_source,
-            )
-
-    # BaseSettings は内部で設定ソースを解決するため、引数なしでの生成を許容する。
-    return _AppConfig()  # type: ignore[call-arg]
+    # 4) Pydantic で型検証しつつ構築して返す
+    #    （unknown keys は extra="ignore" で無視）
+    return AppConfig(**merged)
 
 
-def redact_secrets(cfg: AppConfig) -> dict:
-    d = cfg.model_dump()
-    if "keys" in d:
-        d["keys"] = {"api_key": "***", "api_secret": "***"}
-    return d
+def redact_secrets(cfg: AppConfig) -> dict[str, Any]:
+    """何をする関数：設定ダンプからAPIキーを伏せる"""
+
+    dumped = cfg.model_dump()
+    if "keys" in dumped:
+        dumped["keys"] = {"api_key": "***", "api_secret": "***"}
+    return dumped
