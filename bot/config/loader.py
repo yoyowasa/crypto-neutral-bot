@@ -1,9 +1,12 @@
 from __future__ import annotations
-from pathlib import Path
+
 import os
-import yaml  # type: ignore[import-untyped]
+from pathlib import Path
 from typing import Any, Callable
+
+import yaml  # type: ignore[import-untyped]
 from pydantic_settings import SettingsConfigDict
+
 from .models import AppConfig
 
 
@@ -30,11 +33,7 @@ def load_config(config_path: str | None = None) -> AppConfig:
     優先順位: init引数 > 環境変数 > .env > YAML(最低)
     config_path 未指定時は APP_CONFIG or 'config/app.yaml'
     """
-    yaml_path = (
-        Path(config_path)
-        if config_path
-        else Path(os.environ.get("APP_CONFIG", "config/app.yaml"))
-    )
+    yaml_path = Path(config_path) if config_path else Path(os.environ.get("APP_CONFIG", "config/app.yaml"))
 
     class _AppConfig(AppConfig):
         model_config = SettingsConfigDict(
