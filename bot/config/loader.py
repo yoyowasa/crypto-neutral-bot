@@ -1,7 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 import os
-import yaml
+import yaml  # type: ignore[import-untyped]
 from typing import Any, Callable
 from pydantic_settings import SettingsConfigDict
 from .models import AppConfig
