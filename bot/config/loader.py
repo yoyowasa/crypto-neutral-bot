@@ -11,6 +11,7 @@ from typing import Any, MutableMapping
 import yaml  # type: ignore[import-untyped]  # YAMLを読むための外部ライブラリ
 from dotenv import find_dotenv, load_dotenv  # .env を環境変数に反映
 
+
 from .models import AppConfig
 
 
@@ -60,6 +61,7 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
     yaml_data: dict[str, Any] = {}
     if path.exists():
         with path.open("r", encoding="utf-8") as f:
+
             loaded = yaml.safe_load(f)
             if isinstance(loaded, dict):
                 # YAMLは小文字キーで書く前提（サンプルも小文字）
@@ -80,3 +82,4 @@ def redact_secrets(cfg: AppConfig) -> dict[str, Any]:
     if "keys" in dumped:
         dumped["keys"] = {"api_key": "***", "api_secret": "***"}
     return dumped
+
