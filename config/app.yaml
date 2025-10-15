@@ -1,14 +1,21 @@
+# アプリ設定（この値は .env の環境変数で上書き可能：例 KEYS__API_KEY）
+keys:
+  api_key: "CHANGE_ME_IN_DOTENV"   # 本番は .env で上書きする
+  api_secret: "CHANGE_ME_IN_DOTENV"
+
 exchange:
-  name: bybit
-  environment: testnet
+  name: "bybit"
+  environment: "testnet"           # "mainnet" も可
   recv_window_ms: 5000
+  ws_public_url: null              # TODO: 要API確認
+  ws_private_url: null             # TODO: 要API確認
 
 risk:
-  max_total_notional_usdt: 50000
-  max_symbol_notional_usdt: 25000
-  max_net_delta_bps: 20
+  max_total_notional: 10000
+  max_symbol_notional: 5000
+  max_net_delta: 0.001
   max_slippage_bps: 10
-  loss_cut_daily_usdt: 1000
+  loss_cut_daily_jpy: 20000
 
 strategy:
   symbols: ["BTCUSDT", "ETHUSDT"]
