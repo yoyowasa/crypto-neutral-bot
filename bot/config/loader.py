@@ -1,7 +1,6 @@
 """設定ローダ。
 このファイルは「.env と YAML を読み込み、環境変数優先でマージして AppConfig を返す」ことをする。
 """
-
 from __future__ import annotations
 
 import os
