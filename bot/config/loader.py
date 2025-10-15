@@ -1,6 +1,7 @@
 """設定ローダ。
 このファイルは「.env と YAML を読み込み、環境変数優先でマージして AppConfig を返す」ことをする。
 """
+
 from __future__ import annotations
 
 import os
@@ -45,6 +46,7 @@ def _merge_env_over_yaml(base: dict[str, Any], env: dict[str, str]) -> dict[str,
             out["timezone"] = val
         # それ以外のENVは無視（extra="ignore" のため既知以外は落とす）
     return out
+
 
 def load_config(config_path: str | Path | None = None) -> AppConfig:
     """何をする関数：.env と YAML を読み込み、型検証した AppConfig を返す"""
