@@ -15,11 +15,11 @@ def test_load_config_env_overrides(tmp_path, monkeypatch):
 exchange:
   environment: testnet
 risk:
-  max_total_notional_usdt: 1000
-  max_symbol_notional_usdt: 500
-  max_net_delta_bps: 20
+  max_total_notional: 10000
+  max_symbol_notional: 5000
+  max_net_delta: 0.001
   max_slippage_bps: 10
-  loss_cut_daily_usdt: 50
+  loss_cut_daily_jpy: 20000
 """
     p = tmp_path / "app.yaml"
     p.write_text(yaml_text, encoding="utf-8")
