@@ -22,6 +22,13 @@ ccxt = "^4.3.0"                                      # 取引所RESTラッパ（
 pybit = "*"                                          # TODO: v5対応版の正式パッケージ名・バージョンは要確認
 PyYAML = "^6.0.2"                                    # YAML 読み込み用ライブラリ
 
+[tool.poetry.dev-dependencies]
+pytest = "^8.2.1"            # テスト実行
+pytest-asyncio = "^0.23.7"   # 非同期テスト
+ruff = "^0.5.7"              # Linter（高速）
+black = "^24.8.0"            # フォーマッタ
+mypy = "^1.10.0"             # 型検査
+pre-commit = "^3.7.1"        # コミット時の自動チェック
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.1"            # テスト実行
@@ -51,7 +58,6 @@ exclude = ["db/**"]            # 生成物等は除外可
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]  # 基本のエラー/フォーマット/インポート順/バグベア
-
 
 [tool.mypy]
 python_version = "3.11"
