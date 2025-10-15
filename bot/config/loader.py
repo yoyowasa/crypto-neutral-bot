@@ -7,9 +7,8 @@ import os
 from pathlib import Path
 from typing import Any, MutableMapping
 
-from dotenv import find_dotenv, load_dotenv  # .env を環境変数に反映
 import yaml  # type: ignore[import-untyped]  # YAMLを読むための外部ライブラリ
-
+from dotenv import find_dotenv, load_dotenv  # .env を環境変数に反映
 
 from .models import AppConfig
 
