@@ -1,7 +1,8 @@
-# fmt: skip
+
 """設定モデル定義（Pydantic v2）。
 このファイルは「設定の入れ物（型）」を定義する。環境変数とYAMLから読み込んだ値を安全に保持する。
 """
+
 from __future__ import annotations
 
 from pydantic import BaseModel, Field

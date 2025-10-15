@@ -1,4 +1,3 @@
-# fmt: skip
 """設定ローダ。
 このファイルは「.env と YAML を読み込み、環境変数優先でマージして AppConfig を返す」ことをする。
 """
@@ -8,8 +7,9 @@ import os
 from pathlib import Path
 from typing import Any, MutableMapping
 
-import yaml  # type: ignore[import-untyped]  # YAMLを読むための外部ライブラリ
 from dotenv import find_dotenv, load_dotenv  # .env を環境変数に反映
+import yaml  # type: ignore[import-untyped]  # YAMLを読むための外部ライブラリ
+
 
 from .models import AppConfig
 
@@ -46,7 +46,6 @@ def _merge_env_over_yaml(base: dict[str, Any], env: dict[str, str]) -> dict[str,
             out["timezone"] = val
         # それ以外のENVは無視（extra="ignore" のため既知以外は落とす）
     return out
-
 
 def load_config(config_path: str | Path | None = None) -> AppConfig:
     """何をする関数：.env と YAML を読み込み、型検証した AppConfig を返す"""
