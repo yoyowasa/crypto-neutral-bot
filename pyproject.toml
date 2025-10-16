@@ -20,7 +20,7 @@ polars = "^1.6.0"                                    # 高速データフレー�
 python-dotenv = "^1.0.1"                             # .env ロード補助
 ccxt = "^4.3.0"                                      # 取引所RESTラッパ（Bybit代替手段）
 pybit = "*"                                          # TODO: v5対応版の正式パッケージ名・バージョンは要確認
-PyYAML = "^6.0.2"                                    # YAML 読み込み用ライブラリ
+pyyaml = "^6.0.2"                                    # YAML 読み込み用ライブラリ
 
 [tool.poetry.dev-dependencies]
 pytest = "^8.2.1"            # テスト実行
