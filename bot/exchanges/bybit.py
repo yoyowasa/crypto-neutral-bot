@@ -73,9 +73,7 @@ class BybitGateway(ExchangeGateway):
             else "wss://stream.bybit.com/v5/public/linear"
         )
         self._ws_private = (
-            "wss://stream-testnet.bybit.com/v5/private"
-            if self._auth.testnet
-            else "wss://stream.bybit.com/v5/private"
+            "wss://stream-testnet.bybit.com/v5/private" if self._auth.testnet else "wss://stream.bybit.com/v5/private"
         )
 
         # ping 間隔（推奨は20秒おきに ping）
@@ -216,9 +214,7 @@ class BybitGateway(ExchangeGateway):
                 client_id=created.get("clientOrderId"),
                 status=self._order_status_from_ccxt(created.get("status") or "open"),
                 filled_qty=float(created.get("filled", 0.0)),
-                avg_fill_price=float(created.get("average", 0.0))
-                if created.get("average") is not None
-                else None,
+                avg_fill_price=float(created.get("average", 0.0)) if created.get("average") is not None else None,
             )
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e)) from e
@@ -281,9 +277,7 @@ class BybitGateway(ExchangeGateway):
             try:
                 fr = await self._rest.fetch_funding_rate(ccxt_sym)
                 current_rate = float(fr.get("fundingRate")) if fr.get("fundingRate") is not None else None
-                predicted_rate = (
-                    float(fr.get("nextFundingRate")) if fr.get("nextFundingRate") is not None else None
-                )
+                predicted_rate = float(fr.get("nextFundingRate")) if fr.get("nextFundingRate") is not None else None
                 nft = fr.get("nextFundingTimestamp")
                 if nft is not None:
                     next_time = parse_exchange_ts(nft)
