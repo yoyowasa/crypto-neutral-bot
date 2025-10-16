@@ -1,82 +1,75 @@
-"""設定ローダ。
-このファイルは「.env と YAML を読み込み、環境変数優先でマージして AppConfig を返す」ことをする。
-"""
-
+# これは「.env と YAML を読み、型付き設定(AppConfig)を返す関数」を置くファイルです。
+# 環境変数 > .env > YAML > デフォルト の優先度でマージします（実装では .env を環境に取り込み、環境変数として扱います）。
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, MutableMapping
+from typing import Any, Mapping
 
-import yaml  # type: ignore[import-untyped]  # YAMLを読むための外部ライブラリ
-from dotenv import find_dotenv, load_dotenv  # .env を環境変数に反映
+from dotenv import load_dotenv  # .env を環境変数に取り込む
+import yaml  # YAML を dict に読み込む
 
 from .models import AppConfig
 
 
-def _deep_set(dic: MutableMapping[str, Any], path: list[str], value: Any) -> None:
-    """何をする関数：'A__B__C' のようなENVキーをネストdictに差し込む（小文字キー前提）"""
+def _set_nested(d: dict[str, Any], keys: list[str], value: Any) -> None:
+    """ユーティリティ：['risk','max_total_notional'] のようなキー列でネスト辞書に値を入れる"""
 
-    cur = dic
-    for key in path[:-1]:
-        if key not in cur or not isinstance(cur[key], dict):
-            cur[key] = {}
-        cur = cur[key]  # 次の階層へ潜る
-    cur[path[-1]] = value  # 最終キーに値を設定
-
-
-def _merge_env_over_yaml(base: dict[str, Any], env: dict[str, str]) -> dict[str, Any]:
-    """何をする関数：ENVの値をYAMLで読んだdictに上書きする（ENVが優先）"""
-
-    # 対象となるトップレベル名（AppConfig のフィールド名と合わせる）
-    allowed_roots = {"keys", "exchange", "risk", "strategy"}
-    out: dict[str, Any] = dict(base)  # まずYAMLの内容をコピー
-
-    for raw_key, val in env.items():
-        # 大文字ENVを小文字に変換し、__ でネストとみなす
-        key = raw_key.lower()
-        if "__" in key:
-            parts = key.split("__")
-            root = parts[0]
-            if root in allowed_roots:
-                _deep_set(out, parts, val)
-        elif key == "db_url":
-            out["db_url"] = val
-        elif key == "timezone":
-            out["timezone"] = val
-        # それ以外のENVは無視（extra="ignore" のため既知以外は落とす）
-    return out
+    cur = d
+    for k in keys[:-1]:
+        if k not in cur or not isinstance(cur[k], dict):
+            cur[k] = {}
+        cur = cur[k]
+    cur[keys[-1]] = value
 
 
-def load_config(config_path: str | Path | None = None) -> AppConfig:
-    """何をする関数：.env と YAML を読み込み、型検証した AppConfig を返す"""
+def _env_to_nested_dict(environ: Mapping[str, str]) -> dict[str, Any]:
+    """ユーティリティ：ENVを __ で分割し、AppConfig に対応するネスト辞書へ整形する"""
 
-    # 1) .env を環境に取り込む（find_dotenv はCWDから上位を探索）
-    load_dotenv(find_dotenv(usecwd=True), override=False)
+    result: dict[str, Any] = {}
+    allowed_roots = {"KEYS", "EXCHANGE", "RISK", "STRATEGY"}
+    passthrough_roots = {"DB_URL", "TIMEZONE"}  # ルート直下のキー
 
-    # 2) YAML 読み込み（無ければ空dict）
-    #    既定はプロジェクトルートの 'config/app.yaml' を想定
-    path = Path(config_path) if config_path is not None else Path("config/app.yaml")
+    for raw_key, raw_val in environ.items():
+        if raw_key in passthrough_roots or any(raw_key.startswith(root + "__") for root in allowed_roots):
+            parts = raw_key.lower().split("__")  # 大文字でも小文字でもOKにするため lower
+            _set_nested(result, parts, raw_val)
+    return result
+
+
+def _deep_update(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """ユーティリティ：辞書の深いマージ。override を base に上書き反映して返す"""
+
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_update(base[k], v)
+        else:
+            base[k] = v
+    return base
+
+
+# ◎ 関数：load_config —— 何をする関数？
+# 「.env を読み込み → YAML（config/app.yaml）を読み込み → 環境変数で上書き → AppConfig 型にして返す」
+def load_config() -> AppConfig:
+    # 1) .env を読み込み（存在しなくてもOK）
+    load_dotenv(dotenv_path=Path(".env"), override=False)
+
+    # 2) YAML のパスは環境変数 APP_CONFIG_FILE で上書き可。無ければ 'config/app.yaml'
+    cfg_path = Path(os.environ.get("APP_CONFIG_FILE", "config/app.yaml"))
+
+    # 3) YAML を読む（無ければ空の dict）
     yaml_data: dict[str, Any] = {}
-    if path.exists():
-        with path.open("r", encoding="utf-8") as f:
+    if cfg_path.exists():
+        with cfg_path.open("r", encoding="utf-8") as f:
             loaded = yaml.safe_load(f)
             if isinstance(loaded, dict):
-                # YAMLは小文字キーで書く前提（サンプルも小文字）
                 yaml_data = loaded
 
-    # 3) ENV で上書き（ENVがあれば優先）
-    merged = _merge_env_over_yaml(yaml_data, dict(os.environ))
+    # 4) 環境変数をネスト辞書に整形（.env で取り込んだ値も含まれる）
+    env_data = _env_to_nested_dict(os.environ)
 
-    # 4) Pydantic で型検証しつつ構築して返す
-    #    （unknown keys は extra="ignore" で無視）
+    # 5) YAML をベースに、環境変数で上書き
+    merged = _deep_update(dict(yaml_data), env_data)
+
+    # 6) 最後に AppConfig 型としてバリデーションしながら構築して返す
     return AppConfig(**merged)
-
-
-def redact_secrets(cfg: AppConfig) -> dict[str, Any]:
-    """何をする関数：設定ダンプからAPIキーを伏せる"""
-
-    dumped = cfg.model_dump()
-    if "keys" in dumped:
-        dumped["keys"] = {"api_key": "***", "api_secret": "***"}
-    return dumped
