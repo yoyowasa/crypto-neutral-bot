@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-import yaml  # YAML を dict に読み込む
+import yaml  # type: ignore[import-untyped]  # YAML を dict に読み込む
 from dotenv import load_dotenv  # .env を環境変数に取り込む
 
 from .models import AppConfig
@@ -50,12 +50,15 @@ def _deep_update(base: dict[str, Any], override: dict[str, Any]) -> dict[str, An
 
 # ◎ 関数：load_config —— 何をする関数？
 # 「.env を読み込み → YAML（config/app.yaml）を読み込み → 環境変数で上書き → AppConfig 型にして返す」
-def load_config() -> AppConfig:
+def load_config(config_path: str | os.PathLike[str] | None = None) -> AppConfig:
     # 1) .env を読み込み（存在しなくてもOK）
     load_dotenv(dotenv_path=Path(".env"), override=False)
 
-    # 2) YAML のパスは環境変数 APP_CONFIG_FILE で上書き可。無ければ 'config/app.yaml'
-    cfg_path = Path(os.environ.get("APP_CONFIG_FILE", "config/app.yaml"))
+    # 2) YAML のパスは引数 > 環境変数 APP_CONFIG_FILE > 'config/app.yaml' の優先度で決定
+    if config_path is not None:
+        cfg_path = Path(config_path)
+    else:
+        cfg_path = Path(os.environ.get("APP_CONFIG_FILE", "config/app.yaml"))
 
     # 3) YAML を読む（無ければ空の dict）
     yaml_data: dict[str, Any] = {}
@@ -73,3 +76,16 @@ def load_config() -> AppConfig:
 
     # 6) 最後に AppConfig 型としてバリデーションしながら構築して返す
     return AppConfig(**merged)
+
+
+# ◎ 関数：redact_secrets —— 何をする関数？
+# 「AppConfig から秘密情報（API鍵など）を伏せた辞書を作り、表示用に返す」
+def redact_secrets(config: AppConfig) -> dict[str, Any]:
+    safe = config.model_dump(mode="python")
+    keys = safe.get("keys")
+    if isinstance(keys, dict):
+        if "api_key" in keys and keys["api_key"]:
+            keys["api_key"] = "***"
+        if "api_secret" in keys and keys["api_secret"]:
+            keys["api_secret"] = "***"
+    return safe
