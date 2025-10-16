@@ -7,6 +7,8 @@ import os
 
 import pytest
 
+pytest.importorskip("ccxt.async_support", reason="ccxt が無い環境では BybitGateway テストを実行しない")
+
 from bot.exchanges.bybit import BybitGateway
 from bot.exchanges.types import OrderRequest
 
