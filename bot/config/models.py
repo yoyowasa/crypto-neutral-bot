@@ -50,7 +50,7 @@ class AppConfig(BaseSettings):
     keys: ExchangeKeys
     exchange: ExchangeConfig = ExchangeConfig()
     risk: RiskConfig
-    strategy: StrategyFundingConfig
+    strategy: StrategyFundingConfig = StrategyFundingConfig()
     db_url: str = "sqlite+aiosqlite:///./db/trading.db"
     timezone: str = "UTC"
 
