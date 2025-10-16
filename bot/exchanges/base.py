@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable
 
-from .types import Balance, Position, OrderRequest, Order, FundingInfo
+from .types import Balance, FundingInfo, Order, OrderRequest, Position
 
 
 class ExchangeGateway:

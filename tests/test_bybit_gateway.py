@@ -1,3 +1,5 @@
+"""BybitGateway の最小疎通テスト。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,7 +9,6 @@ import pytest
 
 from bot.exchanges.bybit import BybitGateway
 from bot.exchanges.types import OrderRequest
-
 
 REQUIRED_ENV = ("KEYS__API_KEY", "KEYS__API_SECRET")
 

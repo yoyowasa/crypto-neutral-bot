@@ -1,4 +1,5 @@
-# これは「Bybit v5 を CCXT(REST)＋WebSocket(v5) で実装するゲートウェイ」です。
+"""これは「Bybit v5 を CCXT(REST)＋WebSocket(v5) で実装するゲートウェイ」です。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -9,16 +10,14 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Awaitable, Callable
 
+import ccxt.async_support as ccxt  # CCXT の async 版を使う（REST はこれで十分）
 import websockets
-from loguru import logger
-
-# CCXT の async 版を使う（REST はこれで十分）
-import ccxt.async_support as ccxt
 
 from bot.core.errors import ExchangeError, RateLimitError, WsDisconnected
 from bot.core.time import parse_exchange_ts
+
 from .base import ExchangeGateway
-from .types import Balance, Position, OrderRequest, Order, FundingInfo
+from .types import Balance, FundingInfo, Order, OrderRequest, Position
 
 
 @dataclass
@@ -368,7 +367,9 @@ class BybitGateway(ExchangeGateway):
         except Exception as e:  # noqa: BLE001
             raise WsDisconnected(f"private ws error: {e}") from e
 
-    async def subscribe_public(self, symbols: list[str], callbacks: dict[str, Callable[[dict], Awaitable[None]]]) -> None:
+    async def subscribe_public(
+        self, symbols: list[str], callbacks: dict[str, Callable[[dict], Awaitable[None]]]
+    ) -> None:
         """これは何をする関数？
         → Public WS（linear）に接続し、指定シンボルの publicTrade / orderbook.1 を購読します。
         callback のキー例：
