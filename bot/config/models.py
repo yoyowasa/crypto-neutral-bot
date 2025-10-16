@@ -19,7 +19,7 @@ class ExchangeConfig(BaseModel):
     name: str = "bybit"
     environment: str = "testnet"  # "mainnet" も許容
     recv_window_ms: int = 5000
-    ws_public_url: str | None = None   # TODO: 要API確認
+    ws_public_url: str | None = None  # TODO: 要API確認
     ws_private_url: str | None = None  # TODO: 要API確認
 
 
