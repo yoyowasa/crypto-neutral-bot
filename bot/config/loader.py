@@ -6,8 +6,8 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
-from dotenv import load_dotenv  # .env を環境変数に取り込む
 import yaml  # YAML を dict に読み込む
+from dotenv import load_dotenv  # .env を環境変数に取り込む
 
 from .models import AppConfig
 
