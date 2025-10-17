@@ -100,14 +100,20 @@ class OmsEngine:
 
         cid = client_id
         if not cid and order_id:
-            for key, managed in self._orders.items():
-                if managed.order_id == order_id:
+            for key, candidate in self._orders.items():
+                if candidate.order_id == order_id:
                     cid = key
                     break
 
-        managed = self._orders.get(cid) if cid else None
+        managed: ManagedOrder | None = None
+        if cid:
+            managed = self._orders.get(cid)
         if managed:
             managed.state = OrderLifecycleState.CANCELED
+
+        exchange_order_id = order_id or ""
+        if not exchange_order_id and managed and managed.order_id:
+            exchange_order_id = managed.order_id
 
         await self._repo.add_order_log(
             symbol=managed.req.symbol if managed else "",
@@ -116,7 +122,7 @@ class OmsEngine:
             qty=managed.req.qty if managed else 0.0,
             price=managed.req.price if managed else None,
             status="canceled",
-            exchange_order_id=order_id or (managed.order_id if managed else ""),
+            exchange_order_id=exchange_order_id,
             client_id=cid,
         )
 
