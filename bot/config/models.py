@@ -2,16 +2,16 @@
 # Pydantic の BaseModel / BaseSettings を使い、型安全に設定を扱えるようにします。
 from __future__ import annotations
 
-from typing import Any, cast
-
 from pydantic import BaseModel
 
 try:
-    from pydantic_settings import BaseSettings, SettingsConfigDict  # type: ignore[attr-defined]
+    from pydantic_settings import BaseSettings  # type: ignore[attr-defined]
+
+    _HAS_PYDANTIC_SETTINGS = True
 except Exception:  # noqa: BLE001 - import 互換性のため広めに捕捉
     from pydantic import BaseSettings  # type: ignore[no-redef]
 
-    SettingsConfigDict = cast(Any, None)
+    _HAS_PYDANTIC_SETTINGS = False
 
 
 class ExchangeKeys(BaseModel):
@@ -63,11 +63,11 @@ class AppConfig(BaseSettings):
     timezone: str = "UTC"
 
     # 将来、環境変数だけで読みたい場合のために __ 区切りを有効化しておく
-    if SettingsConfigDict is not None:
-        model_config = SettingsConfigDict(
-            env_nested_delimiter="__",
-            extra="ignore",
-        )
+    if _HAS_PYDANTIC_SETTINGS:
+        model_config = {
+            "env_nested_delimiter": "__",
+            "extra": "ignore",
+        }
     else:  # Pydantic v1 向けの後方互換
 
         class Config:  # type: ignore[override,misc]
