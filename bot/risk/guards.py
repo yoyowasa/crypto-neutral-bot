@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from loguru import logger
+
 
 @dataclass
 class _ApiErrorWindow:
@@ -16,7 +17,7 @@ class _ApiErrorWindow:
 
     max_in_window: int = 5
     window_sec: float = 60.0
-    events: deque[float] = deque()
+    events: deque[float] = field(default_factory=deque)
 
     def record(self, now_ts: float) -> int:
         """これは何をする関数？

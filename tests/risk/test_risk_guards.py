@@ -6,17 +6,53 @@ import pytest
 
 from bot.config.models import RiskConfig
 from bot.core.errors import RiskBreach
-from bot.risk.limits import PreTradeContext, precheck_open_order
 from bot.risk.guards import RiskManager
+from bot.risk.limits import PreTradeContext, precheck_open_order
 
 
 @pytest.mark.parametrize(
     "ctx, add_notional, field",
     [
-        (PreTradeContext(used_total_notional=9000, used_symbol_notional=1000, predicted_net_delta_after=0.0, estimated_slippage_bps=1.0), 2000, "total"),
-        (PreTradeContext(used_total_notional=1000, used_symbol_notional=4900, predicted_net_delta_after=0.0, estimated_slippage_bps=1.0), 200, "symbol"),
-        (PreTradeContext(used_total_notional=0, used_symbol_notional=0, predicted_net_delta_after=0.0, estimated_slippage_bps=50.0), 1, "slippage"),
-        (PreTradeContext(used_total_notional=0, used_symbol_notional=0, predicted_net_delta_after=0.01, estimated_slippage_bps=1.0), 1, "delta"),
+        (
+            PreTradeContext(
+                used_total_notional=9000,
+                used_symbol_notional=1000,
+                predicted_net_delta_after=0.0,
+                estimated_slippage_bps=1.0,
+            ),
+            2000,
+            "total",
+        ),
+        (
+            PreTradeContext(
+                used_total_notional=1000,
+                used_symbol_notional=4900,
+                predicted_net_delta_after=0.0,
+                estimated_slippage_bps=1.0,
+            ),
+            200,
+            "symbol",
+        ),
+        (
+            PreTradeContext(
+                used_total_notional=0,
+                used_symbol_notional=0,
+                predicted_net_delta_after=0.0,
+                estimated_slippage_bps=50.0,
+            ),
+            1,
+            "slippage",
+        ),
+        (
+            PreTradeContext(
+                used_total_notional=0,
+                used_symbol_notional=0,
+                predicted_net_delta_after=0.01,
+                estimated_slippage_bps=1.0,
+            ),
+            1,
+            "delta",
+        ),
     ],
 )
 def test_precheck_open_order_raises(ctx, add_notional, field):
@@ -24,7 +60,7 @@ def test_precheck_open_order_raises(ctx, add_notional, field):
     risk = RiskConfig(
         max_total_notional=10000,
         max_symbol_notional=5000,
-        max_net_delta=0.005,     # 0.5% など単位は実装側で統一想定
+        max_net_delta=0.005,  # 0.5% など単位は実装側で統一想定
         max_slippage_bps=10.0,
         loss_cut_daily_jpy=30000,
     )

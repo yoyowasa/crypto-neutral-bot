@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from bot.core.errors import RiskBreach
 from bot.config.models import RiskConfig
+from bot.core.errors import RiskBreach
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,12 @@ def precheck_open_order(
     # 2) 銘柄別名目上限
     if ctx.used_symbol_notional + add_notional > risk.max_symbol_notional:
         raise RiskBreach(
-            f"symbol notional limit({symbol}): used={ctx.used_symbol_notional} + add={add_notional} > max={risk.max_symbol_notional}"
+            "symbol notional limit({symbol}): used={used} + add={add} > max={max}".format(
+                symbol=symbol,
+                used=ctx.used_symbol_notional,
+                add=add_notional,
+                max=risk.max_symbol_notional,
+            )
         )
 
     # 3) 推定スリッページ上限
