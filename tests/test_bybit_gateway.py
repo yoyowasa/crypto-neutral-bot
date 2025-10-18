@@ -9,9 +9,6 @@ import pytest
 
 pytest.importorskip("ccxt.async_support", reason="ccxt が無い環境では BybitGateway テストを実行しない")
 
-from bot.exchanges.bybit import BybitGateway
-from bot.exchanges.types import OrderRequest
-
 REQUIRED_ENV = ("KEYS__API_KEY", "KEYS__API_SECRET")
 
 
@@ -22,27 +19,40 @@ def _has_keys() -> bool:
 @pytest.mark.asyncio
 async def test_rest_smoke_balances_and_ticker():
     """RESTの基本疎通：残高が取れる／ティッカーが読める"""
+    from bot.core.errors import ExchangeError
+    from bot.exchanges.bybit import BybitGateway
 
     gw = BybitGateway(
         api_key=os.environ.get("KEYS__API_KEY", "dummy"),
         api_secret=os.environ.get("KEYS__API_SECRET", "dummy"),
         environment="testnet",
     )
-    # 残高（存在しなくても例外にならないことを確認）
-    bals = await gw.get_balances()
-    assert isinstance(bals, list)
+    try:
+        # 残高（存在しなくても例外にならないことを確認）
+        try:
+            bals = await gw.get_balances()
+        except ExchangeError as exc:
+            msg = str(exc).lower()
+            if "403" in msg or "forbidden" in msg or "cloudfront" in msg:
+                pytest.skip("Bybit Testnet へのアクセスが地域制限で拒否されたためスキップ")
+            raise
+        assert isinstance(bals, list)
 
-    # ティッカー（perp と spot 内部表記の両方）
-    px_perp = await gw.get_ticker("BTCUSDT")
-    assert px_perp > 0
-    px_spot = await gw.get_ticker("BTCUSDT_SPOT")
-    assert px_spot > 0
+        # ティッカー（perp と spot 内部表記の両方）
+        px_perp = await gw.get_ticker("BTCUSDT")
+        assert px_perp > 0
+        px_spot = await gw.get_ticker("BTCUSDT_SPOT")
+        assert px_spot > 0
+    finally:
+        await gw._rest.close()
 
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not _has_keys(), reason="Bybit Testnet keys are not set")
 async def test_post_only_limit_then_cancel_and_ws_order_event():
     """安全な発注：post-only 指値で不成立→取消、WS 'order' イベントを最小確認"""
+    from bot.exchanges.bybit import BybitGateway
+    from bot.exchanges.types import OrderRequest
 
     gw = BybitGateway(
         api_key=os.environ["KEYS__API_KEY"],

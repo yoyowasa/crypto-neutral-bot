@@ -6,13 +6,13 @@ import pytest
 
 pytest.importorskip("loguru")
 
-from bot.core.time import utc_now
-from bot.data.repo import Repo
-
 
 @pytest.mark.asyncio
 async def test_create_tables_and_trade_roundtrip(tmp_path: Path):
     """スキーマ作成→TradeLogを書いて→読み戻せること"""
+    from bot.core.time import utc_now
+    from bot.data.repo import Repo
+
     dbp = tmp_path / "db" / "trading.db"
     url = f"sqlite+aiosqlite:///{dbp}"
     repo = Repo(db_url=url)
@@ -44,6 +44,8 @@ async def test_create_tables_and_trade_roundtrip(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_order_funding_daily_roundtrip(tmp_path: Path):
     """OrderLog / FundingEvent / DailyPnlも書けて読めること"""
+    from bot.data.repo import Repo
+
     dbp = tmp_path / "db" / "trading.db"
     url = f"sqlite+aiosqlite:///{dbp}"
     repo = Repo(db_url=url)
