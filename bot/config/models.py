@@ -2,6 +2,8 @@
 # Pydantic の BaseModel / BaseSettings を使い、型安全に設定を扱えるようにします。
 from __future__ import annotations
 
+from typing import Any, cast
+
 from pydantic import BaseModel
 
 try:
@@ -9,7 +11,7 @@ try:
 except Exception:  # noqa: BLE001 - import 互換性のため広めに捕捉
     from pydantic import BaseSettings  # type: ignore[no-redef]
 
-    SettingsConfigDict = None  # type: ignore[assignment]
+    SettingsConfigDict = cast(Any, None)
 
 
 class ExchangeKeys(BaseModel):
