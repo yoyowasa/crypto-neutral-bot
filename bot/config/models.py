@@ -9,9 +9,13 @@ try:
 
     _HAS_PYDANTIC_SETTINGS = True
 except Exception:  # noqa: BLE001 - import 互換性のため広めに捕捉
-    from pydantic import BaseSettings  # type: ignore[no-redef]
+    try:
+        from pydantic import BaseSettings  # type: ignore[no-redef]
 
-    _HAS_PYDANTIC_SETTINGS = False
+        _HAS_PYDANTIC_SETTINGS = False
+    except Exception:  # noqa: BLE001 - 旧版PydanticなどでBaseSettingsが無い場合のフォールバック
+        BaseSettings = BaseModel  # type: ignore[assignment]
+        _HAS_PYDANTIC_SETTINGS = False
 
 # _HAS_PYDANTIC_SETTINGS フラグで SettingsConfigDict 相当の挙動を切り替える
 
