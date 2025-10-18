@@ -2,11 +2,7 @@
 # Pydantic の BaseModel / BaseSettings を使い、型安全に設定を扱えるようにします。
 from __future__ import annotations
 
-try:
-    from pydantic import BaseModel, Field  # Fieldはミュータブル型の安全なデフォルト（default_factory）に使う
-except ImportError:  # Pydanticのバージョン差異でFieldの場所が異なる場合に備える
-    from pydantic import BaseModel  # type: ignore[attr-defined]
-    from pydantic.fields import Field
+from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,8 +36,8 @@ class RiskConfig(BaseModel):
 class StrategyFundingConfig(BaseModel):
     """Funding/ベーシス戦略のパラメータ（MVP）"""
 
-    # ミュータブル（list）は Field(default_factory=...) で安全にデフォルト化する
-    symbols: list[str] = Field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])
+    # Pydantic は BaseModel 初期化時にコピーを作るため、リストのデフォルトも安全に扱える
+    symbols: list[str] = ["BTCUSDT", "ETHUSDT"]
     min_expected_apr: float = 0.05
     pre_event_open_minutes: int = 60
     hold_across_events: bool = True
