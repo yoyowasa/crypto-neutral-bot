@@ -57,12 +57,8 @@ def precheck_open_order(
 
     # 3) 推定スリッページ上限
     if ctx.estimated_slippage_bps > risk.max_slippage_bps:
-        raise RiskBreach(
-            f"slippage limit: estimated={ctx.estimated_slippage_bps}bps > max={risk.max_slippage_bps}bps"
-        )
+        raise RiskBreach(f"slippage limit: estimated={ctx.estimated_slippage_bps}bps > max={risk.max_slippage_bps}bps")
 
     # 4) ネットデルタ上限（単位の統一は上位で保証する想定 / TODO: 要仕様統一）
     if abs(ctx.predicted_net_delta_after) > risk.max_net_delta:
-        raise RiskBreach(
-            f"net delta limit: predicted_after={ctx.predicted_net_delta_after} > max={risk.max_net_delta}"
-        )
+        raise RiskBreach(f"net delta limit: predicted_after={ctx.predicted_net_delta_after} > max={risk.max_net_delta}")
