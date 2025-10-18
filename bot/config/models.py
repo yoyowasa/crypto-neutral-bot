@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from pydantic import BaseModel
-from pydantic_settings import BaseSettings, SettingsConfigDict
+
+try:
+    from pydantic_settings import BaseSettings, SettingsConfigDict  # type: ignore[attr-defined]
+except Exception:  # noqa: BLE001 - import 互換性のため広めに捕捉
+    from pydantic import BaseSettings  # type: ignore[no-redef]
+
+    SettingsConfigDict = None  # type: ignore[assignment]
 
 
 class ExchangeKeys(BaseModel):
@@ -55,7 +61,12 @@ class AppConfig(BaseSettings):
     timezone: str = "UTC"
 
     # 将来、環境変数だけで読みたい場合のために __ 区切りを有効化しておく
-    model_config = SettingsConfigDict(
-        env_nested_delimiter="__",
-        extra="ignore",
-    )
+    if SettingsConfigDict is not None:
+        model_config = SettingsConfigDict(
+            env_nested_delimiter="__",
+            extra="ignore",
+        )
+    else:  # Pydantic v1 向けの後方互換
+        class Config:  # type: ignore[override,misc]
+            env_nested_delimiter = "__"
+            extra = "ignore"
