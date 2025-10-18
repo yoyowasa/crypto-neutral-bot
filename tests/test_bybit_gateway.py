@@ -19,6 +19,7 @@ def _has_keys() -> bool:
 @pytest.mark.asyncio
 async def test_rest_smoke_balances_and_ticker():
     """RESTの基本疎通：残高が取れる／ティッカーが読める"""
+    from bot.core.errors import ExchangeError
     from bot.exchanges.bybit import BybitGateway
 
     gw = BybitGateway(
@@ -26,15 +27,24 @@ async def test_rest_smoke_balances_and_ticker():
         api_secret=os.environ.get("KEYS__API_SECRET", "dummy"),
         environment="testnet",
     )
-    # 残高（存在しなくても例外にならないことを確認）
-    bals = await gw.get_balances()
-    assert isinstance(bals, list)
+    try:
+        # 残高（存在しなくても例外にならないことを確認）
+        try:
+            bals = await gw.get_balances()
+        except ExchangeError as exc:
+            msg = str(exc).lower()
+            if "403" in msg or "forbidden" in msg or "cloudfront" in msg:
+                pytest.skip("Bybit Testnet へのアクセスが地域制限で拒否されたためスキップ")
+            raise
+        assert isinstance(bals, list)
 
-    # ティッカー（perp と spot 内部表記の両方）
-    px_perp = await gw.get_ticker("BTCUSDT")
-    assert px_perp > 0
-    px_spot = await gw.get_ticker("BTCUSDT_SPOT")
-    assert px_spot > 0
+        # ティッカー（perp と spot 内部表記の両方）
+        px_perp = await gw.get_ticker("BTCUSDT")
+        assert px_perp > 0
+        px_spot = await gw.get_ticker("BTCUSDT_SPOT")
+        assert px_spot > 0
+    finally:
+        await gw._rest.close()
 
 
 @pytest.mark.asyncio
