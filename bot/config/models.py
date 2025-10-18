@@ -13,6 +13,8 @@ except Exception:  # noqa: BLE001 - import 互換性のため広めに捕捉
 
     _HAS_PYDANTIC_SETTINGS = False
 
+# _HAS_PYDANTIC_SETTINGS フラグで SettingsConfigDict 相当の挙動を切り替える
+
 
 class ExchangeKeys(BaseModel):
     """取引所APIの鍵（平文は .env にのみ置く）"""
