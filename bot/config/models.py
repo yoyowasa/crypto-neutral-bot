@@ -67,6 +67,7 @@ class AppConfig(BaseSettings):
             extra="ignore",
         )
     else:  # Pydantic v1 向けの後方互換
+
         class Config:  # type: ignore[override,misc]
             env_nested_delimiter = "__"
             extra = "ignore"
