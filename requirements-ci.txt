@@ -1,6 +1,6 @@
 httpx[http2]>=0.27.0,<0.28.0
 websockets>=12.0,<13.0
-pydantic>=2.7.0,<3.0.0
+pydantic==2.7.*
 pydantic-settings>=2.4.0,<3.0.0
 loguru>=0.7.2,<0.8.0
 tenacity>=8.3.0,<9.0.0
