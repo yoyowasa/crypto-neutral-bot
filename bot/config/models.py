@@ -70,3 +70,23 @@ class AppConfig(BaseModel):
 
     class Config:  # type: ignore[override]
         extra = "ignore"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
+        """これは何をする関数？→ 辞書から AppConfig を生成し、ネストした辞書も適切なモデルに変換します"""
+
+        payload = dict(data)
+        if "keys" in payload and not isinstance(payload["keys"], ExchangeKeys):
+            payload["keys"] = ExchangeKeys(**payload["keys"])
+        if "exchange" in payload and not isinstance(payload["exchange"], ExchangeConfig):
+            payload["exchange"] = ExchangeConfig(**payload["exchange"])
+        if "risk" in payload and not isinstance(payload["risk"], RiskConfig):
+            payload["risk"] = RiskConfig(**payload["risk"])
+        if "strategy" in payload and not isinstance(payload["strategy"], StrategyFundingConfig):
+            payload["strategy"] = StrategyFundingConfig(**payload["strategy"])
+        return cls(**payload)
+
+    def to_dict(self) -> dict[str, Any]:
+        """これは何をする関数？→ AppConfig を辞書に変換し、ログ用などに再利用します"""
+
+        return self.model_dump(mode="python")
