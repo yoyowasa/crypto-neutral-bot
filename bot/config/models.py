@@ -1,9 +1,13 @@
 # これは「設定の型（箱の設計図）」を定義するファイルです。
-# Pydantic の BaseModel / BaseSettings を使い、型安全に設定を扱えるようにします。
+# Pydantic の BaseModel を使い、型安全に設定を扱えるようにします。
+
 from __future__ import annotations
 
-from pydantic import BaseModel, Field  # Fieldはミュータブル型の安全なデフォルト（default_factory）に使う
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Any
+
+from pydantic import BaseModel
+
+DEFAULT_STRATEGY_SYMBOLS: tuple[str, str] = ("BTCUSDT", "ETHUSDT")
 
 
 class ExchangeKeys(BaseModel):
@@ -36,15 +40,20 @@ class RiskConfig(BaseModel):
 class StrategyFundingConfig(BaseModel):
     """Funding/ベーシス戦略のパラメータ（MVP）"""
 
-    # ミュータブル（list）は Field(default_factory=...) で安全にデフォルト化する
-    symbols: list[str] = Field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])
+    symbols: list[str]
     min_expected_apr: float = 0.05
     pre_event_open_minutes: int = 60
     hold_across_events: bool = True
     rebalance_band_bps: float = 5.0  # ネットデルタ再ヘッジ帯
 
+    def __init__(self, **data: Any) -> None:
+        """これは何をする関数？→ 初期化時にシンボルの既定値を安全に設定します"""
+        if "symbols" not in data:
+            data["symbols"] = list(DEFAULT_STRATEGY_SYMBOLS)
+        super().__init__(**data)
 
-class AppConfig(BaseSettings):
+
+class AppConfig(BaseModel):
     """アプリ全体の設定のルート（.env / YAML を統合してここに流し込む）"""
 
     keys: ExchangeKeys
@@ -54,8 +63,30 @@ class AppConfig(BaseSettings):
     db_url: str = "sqlite+aiosqlite:///./db/trading.db"
     timezone: str = "UTC"
 
-    # 将来、環境変数だけで読みたい場合のために __ 区切りを有効化しておく
-    model_config = SettingsConfigDict(
-        env_nested_delimiter="__",
-        extra="ignore",
-    )
+    # Pydantic v2 では model_config、v1 では Config を参照するため両方定義しておく
+    model_config = {
+        "extra": "ignore",
+    }
+
+    class Config:  # type: ignore[override]
+        extra = "ignore"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
+        """これは何をする関数？→ 辞書から AppConfig を生成し、ネストした辞書も適切なモデルに変換します"""
+
+        payload = dict(data)
+        if "keys" in payload and not isinstance(payload["keys"], ExchangeKeys):
+            payload["keys"] = ExchangeKeys(**payload["keys"])
+        if "exchange" in payload and not isinstance(payload["exchange"], ExchangeConfig):
+            payload["exchange"] = ExchangeConfig(**payload["exchange"])
+        if "risk" in payload and not isinstance(payload["risk"], RiskConfig):
+            payload["risk"] = RiskConfig(**payload["risk"])
+        if "strategy" in payload and not isinstance(payload["strategy"], StrategyFundingConfig):
+            payload["strategy"] = StrategyFundingConfig(**payload["strategy"])
+        return cls(**payload)
+
+    def to_dict(self) -> dict[str, Any]:
+        """これは何をする関数？→ AppConfig を辞書に変換し、ログ用などに再利用します"""
+
+        return self.model_dump(mode="python")

@@ -1,0 +1,275 @@
+# これは「注文のライフサイクルを安全に管理するOMSエンジン」を実装するファイルです。
+from __future__ import annotations
+
+import random
+import time
+from typing import Any
+
+from loguru import logger
+
+from bot.core.errors import ExchangeError
+from bot.core.time import utc_now
+from bot.data.repo import Repo
+from bot.exchanges.base import ExchangeGateway
+from bot.exchanges.types import Order, OrderRequest
+
+from .types import ManagedOrder, OmsConfig, OrderLifecycleState
+
+
+class OmsEngine:
+    """注文管理（状態機械）を提供するエンジン。
+    - submit(): 新規発注
+    - cancel(): 取消
+    - submit_hedge(): ネットデルタを埋める成行IOC
+    - on_execution_event(): 約定/状態更新の取り込み
+    - process_timeouts(): タイムアウト監視（テストから明示呼び出し）
+    """
+
+    def __init__(self, ex: ExchangeGateway, repo: Repo, cfg: OmsConfig | None = None) -> None:
+        """これは何をする関数？
+        → ExchangeGateway/Repo/設定を受け取り、注文追跡テーブルを用意します。
+        """
+
+        self._ex = ex
+        self._repo = repo
+        self._cfg = cfg or OmsConfig()
+        self._orders: dict[str, ManagedOrder] = {}  # key: client_id
+
+    # ---------- 内部: client_id 生成 ----------
+
+    def _gen_client_id(self, prefix: str = "oms") -> str:
+        """これは何をする関数？
+        → 時刻(ms)＋ナンスから、衝突しにくい client_id を生成します。
+        """
+
+        ms = int(time.time() * 1000)
+        nonce = random.randint(1000, 9999)
+        return f"{prefix}-{ms}-{nonce}"
+
+    # ---------- 発注/取消API ----------
+
+    async def submit(self, req: OrderRequest) -> Order:
+        """これは何をする関数？
+        → 注文を取引所へ発注し、OMSの追跡に登録します（idempotencyのためclient_id必須）。
+        """
+
+        if not req.client_id:
+            req.client_id = self._gen_client_id("ord")
+
+        logger.info(
+            "OMS submit: symbol={} side={} type={} qty={} price={} cid={}",
+            req.symbol,
+            req.side,
+            req.type,
+            req.qty,
+            req.price,
+            req.client_id,
+        )
+
+        created = await self._ex.place_order(req)
+
+        managed = ManagedOrder(
+            req=req,
+            state=OrderLifecycleState.SENT,
+            sent_at=utc_now(),
+            order_id=created.order_id,
+            filled_qty=created.filled_qty,
+            avg_price=created.avg_fill_price,
+            retries=0,
+        )
+        self._orders[req.client_id] = managed
+
+        await self._repo.add_order_log(
+            symbol=req.symbol,
+            side=req.side,
+            type=req.type,
+            qty=req.qty,
+            price=req.price,
+            status="new",
+            exchange_order_id=created.order_id,
+            client_id=req.client_id,
+        )
+        return created
+
+    async def cancel(self, order_id: str | None = None, client_id: str | None = None) -> None:
+        """これは何をする関数？
+        → 指定注文を取消します（order_id または client_id を指定）。
+        """
+
+        await self._ex.cancel_order(order_id=order_id, client_id=client_id)
+
+        cid = client_id
+        if not cid and order_id:
+            for key, candidate in self._orders.items():
+                if candidate.order_id == order_id:
+                    cid = key
+                    break
+
+        managed: ManagedOrder | None = None
+        if cid:
+            managed = self._orders.get(cid)
+        if managed:
+            managed.state = OrderLifecycleState.CANCELED
+
+        exchange_order_id = order_id or ""
+        if not exchange_order_id and managed and managed.order_id:
+            exchange_order_id = managed.order_id
+
+        await self._repo.add_order_log(
+            symbol=managed.req.symbol if managed else "",
+            side=managed.req.side if managed else "",
+            type=managed.req.type if managed else "",
+            qty=managed.req.qty if managed else 0.0,
+            price=managed.req.price if managed else None,
+            status="canceled",
+            exchange_order_id=exchange_order_id,
+            client_id=cid,
+        )
+
+    async def submit_hedge(self, symbol: str, delta_to_neutral: float) -> None:
+        """これは何をする関数？
+        → ネットデルタをゼロに近づける成行IOCを出します。
+        """
+
+        if delta_to_neutral == 0:
+            logger.info("OMS hedge: delta already neutral")
+            return
+
+        side = "buy" if delta_to_neutral > 0 else "sell"
+        qty = abs(delta_to_neutral)
+        req = OrderRequest(
+            symbol=symbol,
+            side=side,
+            type="market",
+            qty=qty,
+            time_in_force="IOC",
+            reduce_only=False,
+            post_only=False,
+            client_id=self._gen_client_id("hedge"),
+        )
+        await self.submit(req)
+
+    # ---------- イベント取り込み ----------
+
+    async def on_execution_event(self, event: dict[str, Any]) -> None:
+        """これは何をする関数？
+        → 取引所からの注文・約定イベントを受け取り、OMS内部状態を更新します。
+        """
+
+        cid = event.get("client_id") or event.get("clientOrderId") or event.get("orderLinkId") or event.get("clientId")
+        if not cid or cid not in self._orders:
+            logger.debug("OMS on_execution_event: unknown client_id, event={}", event)
+            return
+
+        managed = self._orders[cid]
+
+        last_filled = float(event.get("last_filled_qty") or event.get("lastFillQty") or 0.0)
+        cum_filled = float(event.get("cum_filled_qty") or event.get("cumExecQty") or (managed.filled_qty + last_filled))
+        managed.filled_qty = max(managed.filled_qty, cum_filled)
+
+        price_val = event.get("avg_fill_price") or event.get("last_fill_price") or event.get("fillPrice")
+        if price_val is not None:
+            managed.avg_price = float(price_val)
+
+        raw_status = (event.get("status") or "").lower()
+        if raw_status in {"new", "open"}:
+            managed.state = OrderLifecycleState.SENT
+        elif raw_status in {"partially_filled", "partial"}:
+            managed.state = OrderLifecycleState.PARTIALLY_FILLED
+        elif raw_status in {"filled", "done", "closed"}:
+            managed.state = OrderLifecycleState.FILLED
+        elif raw_status in {"canceled", "cancelled"}:
+            managed.state = OrderLifecycleState.CANCELED
+        elif raw_status == "rejected":
+            managed.state = OrderLifecycleState.REJECTED
+
+        if last_filled > 0:
+            await self._repo.add_trade(
+                symbol=managed.req.symbol,
+                side=managed.req.side,
+                qty=last_filled,
+                price=float(price_val) if price_val is not None else 0.0,
+                fee=0.0,
+                exchange_order_id=managed.order_id or "",
+                client_id=cid,
+            )
+
+        remaining = managed.req.qty - managed.filled_qty
+        if managed.state == OrderLifecycleState.PARTIALLY_FILLED and remaining > 1e-12:
+            if managed.retries < self._cfg.max_retries:
+                managed.retries += 1
+                logger.info(
+                    "OMS resend (partial): cid={} remaining={} retry={}",
+                    cid,
+                    remaining,
+                    managed.retries,
+                )
+                child_req = OrderRequest(
+                    symbol=managed.req.symbol,
+                    side=managed.req.side,
+                    type="market",
+                    qty=remaining,
+                    time_in_force="IOC",
+                    reduce_only=managed.req.reduce_only,
+                    post_only=False,
+                    client_id=self._gen_client_id(f"{cid}-r{managed.retries}"),
+                )
+                await self.submit(child_req)
+            else:
+                logger.warning(
+                    "OMS give up resend (partial): cid={} remaining={} retries={}",
+                    cid,
+                    remaining,
+                    managed.retries,
+                )
+
+    # ---------- タイムアウト監視 ----------
+
+    async def process_timeouts(self) -> None:
+        """これは何をする関数？
+        → 未約定注文を監視し、タイムアウトした場合は取消と再送を行います。
+        """
+
+        now = utc_now()
+        for cid, managed in list(self._orders.items()):
+            if managed.state in {
+                OrderLifecycleState.FILLED,
+                OrderLifecycleState.CANCELED,
+                OrderLifecycleState.REJECTED,
+            }:
+                continue
+            if not managed.sent_at:
+                continue
+
+            elapsed = (now - managed.sent_at).total_seconds()
+            if elapsed < self._cfg.order_timeout_sec:
+                continue
+
+            remaining = managed.req.qty - managed.filled_qty
+            logger.warning(
+                "OMS timeout: cid={} elapsed={}s remaining={}",
+                cid,
+                round(elapsed, 3),
+                remaining,
+            )
+
+            try:
+                await self._ex.cancel_order(order_id=managed.order_id, client_id=cid)
+            except ExchangeError as exc:
+                logger.warning("OMS timeout cancel failed: cid={} err={}", cid, exc)
+
+            managed.state = OrderLifecycleState.CANCELED
+
+            if remaining > 1e-12 and managed.retries < self._cfg.max_retries:
+                managed.retries += 1
+                child_req = OrderRequest(
+                    symbol=managed.req.symbol,
+                    side=managed.req.side,
+                    type="market",
+                    qty=remaining,
+                    time_in_force="IOC",
+                    reduce_only=managed.req.reduce_only,
+                    post_only=False,
+                    client_id=self._gen_client_id(f"{cid}-r{managed.retries}"),
+                )
+                await self.submit(child_req)

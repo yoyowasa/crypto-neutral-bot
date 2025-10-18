@@ -75,13 +75,13 @@ def load_config(config_path: str | os.PathLike[str] | None = None) -> AppConfig:
     merged = _deep_update(dict(yaml_data), env_data)
 
     # 6) 最後に AppConfig 型としてバリデーションしながら構築して返す
-    return AppConfig(**merged)
+    return AppConfig.from_dict(merged)
 
 
 # ◎ 関数：redact_secrets —— 何をする関数？
 # 「AppConfig から秘密情報（API鍵など）を伏せた辞書を作り、表示用に返す」
 def redact_secrets(config: AppConfig) -> dict[str, Any]:
-    safe = config.model_dump(mode="python")
+    safe = config.to_dict()
     keys = safe.get("keys")
     if isinstance(keys, dict):
         if "api_key" in keys and keys["api_key"]:
