@@ -9,9 +9,6 @@ import pytest
 
 pytest.importorskip("ccxt.async_support", reason="ccxt が無い環境では BybitGateway テストを実行しない")
 
-from bot.exchanges.bybit import BybitGateway
-from bot.exchanges.types import OrderRequest
-
 REQUIRED_ENV = ("KEYS__API_KEY", "KEYS__API_SECRET")
 
 
@@ -22,6 +19,7 @@ def _has_keys() -> bool:
 @pytest.mark.asyncio
 async def test_rest_smoke_balances_and_ticker():
     """RESTの基本疎通：残高が取れる／ティッカーが読める"""
+    from bot.exchanges.bybit import BybitGateway
 
     gw = BybitGateway(
         api_key=os.environ.get("KEYS__API_KEY", "dummy"),
@@ -43,6 +41,8 @@ async def test_rest_smoke_balances_and_ticker():
 @pytest.mark.skipif(not _has_keys(), reason="Bybit Testnet keys are not set")
 async def test_post_only_limit_then_cancel_and_ws_order_event():
     """安全な発注：post-only 指値で不成立→取消、WS 'order' イベントを最小確認"""
+    from bot.exchanges.bybit import BybitGateway
+    from bot.exchanges.types import OrderRequest
 
     gw = BybitGateway(
         api_key=os.environ["KEYS__API_KEY"],

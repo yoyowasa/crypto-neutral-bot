@@ -9,10 +9,10 @@ import pytest
 
 pytest.importorskip("yaml")
 
-from bot.config.loader import load_config
-
 
 def test_load_config_env_overrides_yaml(tmp_path: Path, monkeypatch):
+    from bot.config.loader import load_config
+
     # 1) テスト用の作業ディレクトリを作る
     work = tmp_path
     (work / "config").mkdir(parents=True, exist_ok=True)

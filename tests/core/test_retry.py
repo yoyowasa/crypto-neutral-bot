@@ -4,12 +4,12 @@ import pytest
 
 pytest.importorskip("loguru")
 
-from bot.core.errors import ExchangeError
-from bot.core.retry import retryable
-
 
 def test_retry_sync_succeeds_after_retries() -> None:
     """同期関数：2回失敗→3回目成功の再試行を確認"""
+    from bot.core.errors import ExchangeError
+    from bot.core.retry import retryable
+
     calls = {"n": 0}
 
     @retryable(tries=3)
@@ -26,6 +26,9 @@ def test_retry_sync_succeeds_after_retries() -> None:
 @pytest.mark.asyncio
 async def test_retry_async_succeeds_after_retries() -> None:
     """非同期関数：1回失敗→2回目成功の再試行を確認"""
+    from bot.core.errors import ExchangeError
+    from bot.core.retry import retryable
+
     calls = {"n": 0}
 
     @retryable(tries=2)
