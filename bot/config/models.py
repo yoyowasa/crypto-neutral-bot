@@ -2,11 +2,11 @@
 # Pydantic の BaseModel / BaseSettings を使い、型安全に設定を扱えるようにします。
 from __future__ import annotations
 
-from pydantic import BaseModel
 try:
-    from pydantic import Field  # Fieldはミュータブル型の安全なデフォルト（default_factory）に使う
+    from pydantic import BaseModel, Field  # Fieldはミュータブル型の安全なデフォルト（default_factory）に使う
 except ImportError:  # Pydanticのバージョン差異でFieldの場所が異なる場合に備える
-    from pydantic.fields import Field  # type: ignore[attr-defined]
+    from pydantic import BaseModel  # type: ignore[attr-defined]
+    from pydantic.fields import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
