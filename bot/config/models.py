@@ -1,23 +1,13 @@
 # これは「設定の型（箱の設計図）」を定義するファイルです。
-# Pydantic の BaseModel / BaseSettings を使い、型安全に設定を扱えるようにします。
+# Pydantic の BaseModel を使い、型安全に設定を扱えるようにします。
+
 from __future__ import annotations
+
+from typing import Any
 
 from pydantic import BaseModel
 
-try:
-    from pydantic_settings import BaseSettings  # type: ignore[attr-defined]
-
-    _HAS_PYDANTIC_SETTINGS = True
-except Exception:  # noqa: BLE001 - import 互換性のため広めに捕捉
-    try:
-        from pydantic import BaseSettings  # type: ignore[no-redef]
-
-        _HAS_PYDANTIC_SETTINGS = False
-    except Exception:  # noqa: BLE001 - 旧版PydanticなどでBaseSettingsが無い場合のフォールバック
-        BaseSettings = BaseModel  # type: ignore[assignment]
-        _HAS_PYDANTIC_SETTINGS = False
-
-# _HAS_PYDANTIC_SETTINGS フラグで SettingsConfigDict 相当の挙動を切り替える
+DEFAULT_STRATEGY_SYMBOLS: tuple[str, str] = ("BTCUSDT", "ETHUSDT")
 
 
 class ExchangeKeys(BaseModel):
@@ -50,15 +40,20 @@ class RiskConfig(BaseModel):
 class StrategyFundingConfig(BaseModel):
     """Funding/ベーシス戦略のパラメータ（MVP）"""
 
-    # Pydantic は BaseModel 初期化時にコピーを作るため、リストのデフォルトも安全に扱える
-    symbols: list[str] = ["BTCUSDT", "ETHUSDT"]
+    symbols: list[str]
     min_expected_apr: float = 0.05
     pre_event_open_minutes: int = 60
     hold_across_events: bool = True
     rebalance_band_bps: float = 5.0  # ネットデルタ再ヘッジ帯
 
+    def __init__(self, **data: Any) -> None:
+        """これは何をする関数？→ 初期化時にシンボルの既定値を安全に設定します"""
+        if "symbols" not in data:
+            data["symbols"] = list(DEFAULT_STRATEGY_SYMBOLS)
+        super().__init__(**data)
 
-class AppConfig(BaseSettings):
+
+class AppConfig(BaseModel):
     """アプリ全体の設定のルート（.env / YAML を統合してここに流し込む）"""
 
     keys: ExchangeKeys
@@ -68,14 +63,10 @@ class AppConfig(BaseSettings):
     db_url: str = "sqlite+aiosqlite:///./db/trading.db"
     timezone: str = "UTC"
 
-    # 将来、環境変数だけで読みたい場合のために __ 区切りを有効化しておく
-    if _HAS_PYDANTIC_SETTINGS:
-        model_config = {
-            "env_nested_delimiter": "__",
-            "extra": "ignore",
-        }
-    else:  # Pydantic v1 向けの後方互換
+    # Pydantic v2 では model_config、v1 では Config を参照するため両方定義しておく
+    model_config = {
+        "extra": "ignore",
+    }
 
-        class Config:  # type: ignore[override,misc]
-            env_nested_delimiter = "__"
-            extra = "ignore"
+    class Config:  # type: ignore[override]
+        extra = "ignore"
