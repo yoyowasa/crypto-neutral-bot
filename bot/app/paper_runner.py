@@ -14,6 +14,8 @@ from bot.config.loader import load_config
 from bot.core.logging import setup_logging
 from bot.data.repo import Repo
 from bot.exchanges.bybit import BybitGateway
+from bot.monitor.metrics import MetricsLogger
+from bot.monitor.report import ReportScheduler
 from bot.oms.engine import OmsEngine
 from bot.oms.fill_sim import PaperExchange
 from bot.risk.guards import RiskManager
@@ -114,11 +116,14 @@ async def _run(config_path: str | None) -> None:
 
     strat_task = asyncio.create_task(_strategy_loop())
 
-    # 終了待ち（Ctrl+Cでキャンセル）
-    try:
-        await asyncio.gather(ws_task, strat_task)
-    except asyncio.CancelledError:
-        pass
+    # メトリクス心拍（30秒おき）と、日次レポート（UTC 00:05）
+    metrics = MetricsLogger(ex=paper_ex, repo=repo, symbols=cfg.strategy.symbols, risk=rm)
+    metrics_task = asyncio.create_task(metrics.run_forever(interval_sec=30.0))
+    reporter = ReportScheduler(repo=repo, out_dir="reports", hour_utc=0, minute_utc=5)
+    report_task = asyncio.create_task(reporter.run_forever())
+
+    # gather に参加させる
+    await asyncio.gather(ws_task, strat_task, metrics_task, report_task)
 
 
 def main() -> None:

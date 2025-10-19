@@ -14,6 +14,8 @@ from bot.core.retry import retryable
 from bot.data.repo import Repo
 from bot.exchanges.base import ExchangeGateway
 from bot.exchanges.bybit import BybitGateway
+from bot.monitor.metrics import MetricsLogger
+from bot.monitor.report import ReportScheduler
 from bot.oms.engine import OmsEngine
 from bot.oms.fill_sim import PaperExchange
 from bot.risk.guards import RiskManager
@@ -247,6 +249,14 @@ async def _main_async(env: str, cfg_path: str | None, dry_run: bool, flatten_on_
             await asyncio.sleep(3.0)
 
     tasks.append(asyncio.create_task(_loop()))
+
+    # メトリクス心拍（30秒おき）
+    metrics = MetricsLogger(ex=trade_ex, repo=repo, symbols=cfg.strategy.symbols, risk=rm)
+    tasks.append(asyncio.create_task(metrics.run_forever(interval_sec=30.0)))
+
+    # 日次レポート（UTC 00:05 に前日分を作成）
+    reporter = ReportScheduler(repo=repo, out_dir="reports", hour_utc=0, minute_utc=5)
+    tasks.append(asyncio.create_task(reporter.run_forever()))
 
     # 終了待ち
     try:
