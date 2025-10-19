@@ -65,3 +65,9 @@ warn_unused_configs = true
 ignore_missing_imports = true   # サードパーティ型定義が無い場合でも通す（MVP段階）
 no_implicit_optional = true
 pretty = true
+
+files = ["bot"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = true
