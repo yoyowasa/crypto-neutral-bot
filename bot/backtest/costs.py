@@ -46,4 +46,3 @@ def estimate_slippage_bps(qty_base: float, *, model: CostModel) -> float:
         return model.min_slippage_bps
     ratio = max(0.0, float(qty_base)) / float(model.depth_qty_base)
     return max(model.min_slippage_bps, model.min_slippage_bps * (1.0 + ratio))
-

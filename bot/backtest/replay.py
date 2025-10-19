@@ -133,7 +133,7 @@ class FundingSchedule:
                 raise ValueError(f"missing column in funding csv: {k}")
         ts = pd.to_datetime(df[cols["ts"]], utc=True)
         out: list[FundingRateEvent] = []
-        for (t, sym, r) in zip(ts, df[cols["symbol"]], df[cols["rate"]], strict=False):
+        for t, sym, r in zip(ts, df[cols["symbol"]], df[cols["rate"]], strict=False):
             out.append(FundingRateEvent(ts=t.to_pydatetime(), symbol=str(sym), rate=float(r)))
         out.sort(key=lambda x: (x.ts, x.symbol))
         return out
