@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -26,6 +26,38 @@ async def test_sleep_until_now_returns_quickly() -> None:
     await sleep_until(start)
     end = utc_now()
     assert (end - start).total_seconds() < 0.5
+
+
+@pytest.mark.asyncio
+async def test_sleep_until_naive_datetime_raises() -> None:
+    """タイムゾーンなしの datetime を渡すと ValueError になること"""
+    from bot.core.time import sleep_until
+
+    naive = datetime(2024, 1, 1, 0, 0, 0)
+
+    with pytest.raises(ValueError):
+        await sleep_until(naive)
+
+
+@pytest.mark.asyncio
+async def test_sleep_until_converts_to_utc(monkeypatch: pytest.MonkeyPatch) -> None:
+    """UTC 以外のタイムゾーンでもUTC換算後の遅延で待機すること"""
+    from bot.core.time import sleep_until
+
+    captured: dict[str, float] = {}
+
+    async def fake_sleep(delay: float) -> None:
+        captured["delay"] = delay
+
+    target = datetime(2024, 1, 1, 9, 1, tzinfo=timezone(timedelta(hours=9)))
+    now = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr("bot.core.time.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("bot.core.time.utc_now", lambda: now)
+
+    await sleep_until(target)
+
+    assert captured["delay"] == pytest.approx(60.0, abs=1e-9)
 
 
 def test_parse_iso_z() -> None:
