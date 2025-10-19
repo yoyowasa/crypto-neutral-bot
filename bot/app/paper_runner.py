@@ -1,8 +1,7 @@
-from __future__ import annotations
-
 """これは「Paperモードで戦略を回すエントリポイント」です。
 Bybit Public WSのBBOを使って疑似約定し、DBへログ/トレードを記録します。
 """
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -10,8 +9,8 @@ from typing import Any
 
 from loguru import logger
 
-from bot.core.logging import setup_logging
 from bot.config.loader import load_config
+from bot.core.logging import setup_logging
 from bot.data.repo import Repo
 from bot.exchanges.bybit import BybitGateway
 from bot.oms.engine import OmsEngine
@@ -135,4 +134,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -1,26 +1,23 @@
 from __future__ import annotations
 
-"""これは「Live運用エントリポイント（Testnet/Mainnet、dry-run対応）」を実装するファイルです。
---env で環境切替、--dry-run で PaperExchange を使い実発注せずに全経路を通します。
-"""
-
+# これは「Live運用エントリポイント（Testnet/Mainnet、dry-run対応）」を実装するファイルです。
+# --env で環境切替、--dry-run で PaperExchange を使い実発注せずに全経路を通します。
 import argparse
 import asyncio
 from typing import Any
 
 from loguru import logger
 
+from bot.config.loader import load_config
 from bot.core.logging import setup_logging
 from bot.core.retry import retryable
-from bot.config.loader import load_config
 from bot.data.repo import Repo
-from bot.exchanges.bybit import BybitGateway
 from bot.exchanges.base import ExchangeGateway
+from bot.exchanges.bybit import BybitGateway
 from bot.oms.engine import OmsEngine
 from bot.oms.fill_sim import PaperExchange
 from bot.risk.guards import RiskManager
 from bot.strategy.funding_basis.engine import FundingBasisStrategy
-
 
 # ===== Bybit Privateメッセージ → OMSイベント の最小変換（MVP） =====
 
@@ -128,7 +125,10 @@ async def _run_public_ws_for_paper(data_ex: BybitGateway, paper_ex: PaperExchang
     async def _orderbook_cb(msg: dict) -> None:
         await paper_ex.handle_public_msg(msg)
 
-    await data_ex.subscribe_public(symbols=symbols, callbacks={"publicTrade": _public_trade_cb, "orderbook": _orderbook_cb})
+    await data_ex.subscribe_public(
+        symbols=symbols,
+        callbacks={"publicTrade": _public_trade_cb, "orderbook": _orderbook_cb},
+    )
 
 
 @retryable(tries=999999, wait_initial=0.5, wait_max=10.0)
@@ -288,4 +288,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

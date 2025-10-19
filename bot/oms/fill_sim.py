@@ -8,7 +8,6 @@ from loguru import logger
 
 from bot.exchanges.base import ExchangeGateway
 from bot.exchanges.types import Balance, FundingInfo, Order, OrderRequest, Position
-from bot.core.time import utc_now
 
 
 @dataclass
@@ -353,8 +352,9 @@ class PaperExchange(ExchangeGateway):
             new_size = pos.size + float(qty)
             if new_size > 0:
                 pos.entry_price = (
-                    (pos.entry_price * pos.size + float(qty) * float(price)) / new_size if pos.size > 0 else float(price)
+                    (pos.entry_price * pos.size + float(qty) * float(price)) / new_size
+                    if pos.size > 0
+                    else float(price)
                 )
             pos.size = new_size
             pos.unrealized_pnl = 0.0  # MVPでは常に0とする
-
