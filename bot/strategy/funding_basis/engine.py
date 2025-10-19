@@ -1,4 +1,5 @@
 """Funding/Basis 戦略の評価・実行ロジック。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -154,9 +155,7 @@ class FundingBasisStrategy:
                 predicted_rate=predicted_rate,
             )
         apr = (
-            annualize_rate(predicted_rate, period_seconds=self._period_seconds)
-            if predicted_rate is not None
-            else None
+            annualize_rate(predicted_rate, period_seconds=self._period_seconds) if predicted_rate is not None else None
         )
 
         holding = self._holdings.get(symbol)

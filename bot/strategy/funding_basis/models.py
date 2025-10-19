@@ -1,4 +1,5 @@
 """Funding/Basis 戦略で利用する基礎モデル群とユーティリティ関数。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

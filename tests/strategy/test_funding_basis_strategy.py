@@ -67,6 +67,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - スタブ挿入
     else:
         raise
 
+
 class DummyOms:
     """FundingBasisStrategy のテスト用に最低限のインターフェースを提供するダミーOMS。"""
 
