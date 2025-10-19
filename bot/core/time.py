@@ -48,9 +48,12 @@ def parse_exchange_ts(x: Any) -> datetime:
 
 async def sleep_until(when: datetime) -> None:
     """これは何をする関数？
-    → 与えられたUTC時刻（naiveの場合はUTCとみなす）まで非同期で待機します。
+    → 与えられたタイムゾーン付きの時刻をUTCに揃えて、その時刻まで非同期で待機します。
     """
-    target = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+    if when.tzinfo is None:
+        raise ValueError("sleep_until expects timezone-aware datetime")
+
+    target = when.astimezone(timezone.utc)
     delay = (target - utc_now()).total_seconds()
     await asyncio.sleep(max(0.0, delay))
 
