@@ -149,14 +149,26 @@ class FundingBasisStrategy:
 
         predicted_rate = funding.predicted_rate
         if predicted_rate is not None:
-            self._risk_manager.update_funding_predicted(symbol=symbol, predicted_rate=predicted_rate)
-        apr = annualize_rate(predicted_rate, period_seconds=self._period_seconds) if predicted_rate is not None else None
+            self._risk_manager.update_funding_predicted(
+                symbol=symbol,
+                predicted_rate=predicted_rate,
+            )
+        apr = (
+            annualize_rate(predicted_rate, period_seconds=self._period_seconds)
+            if predicted_rate is not None
+            else None
+        )
 
         holding = self._holdings.get(symbol)
 
         if holding:
             if predicted_rate is None:
-                return Decision(action=DecisionAction.CLOSE, symbol=symbol, reason="予想不明のため一旦解消", predicted_apr=None)
+                return Decision(
+                    action=DecisionAction.CLOSE,
+                    symbol=symbol,
+                    reason="予想不明のため一旦解消",
+                    predicted_apr=None,
+                )
             if predicted_rate <= 0:
                 return Decision(
                     action=DecisionAction.CLOSE,
@@ -189,7 +201,12 @@ class FundingBasisStrategy:
             return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="Funding予想が取得できない")
 
         if predicted_rate <= 0:
-            return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="負のFundingは新規対象外", predicted_apr=apr)
+            return Decision(
+                action=DecisionAction.SKIP,
+                symbol=symbol,
+                reason="負のFundingは新規対象外",
+                predicted_apr=apr,
+            )
 
         if apr is not None and apr < self._strategy_config.min_expected_apr:
             return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="APRが閾値未満", predicted_apr=apr)
@@ -202,7 +219,12 @@ class FundingBasisStrategy:
             used_symbol_notional=used_symbol,
         )
         if candidate <= 0:
-            return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="名目上限により建て不可", predicted_apr=apr)
+            return Decision(
+                action=DecisionAction.SKIP,
+                symbol=symbol,
+                reason="名目上限により建て不可",
+                predicted_apr=apr,
+            )
 
         expected_gain = predicted_rate * candidate
         total_cost_bps = self._taker_fee_bps_roundtrip + self._estimated_slippage_bps

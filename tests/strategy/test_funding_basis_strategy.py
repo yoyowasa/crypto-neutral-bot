@@ -4,7 +4,6 @@ import asyncio
 import sys
 import types
 
-
 if "loguru" not in sys.modules:  # pragma: no cover - テスト環境用スタブ
     stub = types.ModuleType("loguru")
 
@@ -68,12 +67,6 @@ except ModuleNotFoundError as exc:  # pragma: no cover - スタブ挿入
     else:
         raise
 
-from bot.config.models import RiskConfig, StrategyFundingConfig
-from bot.exchanges.types import FundingInfo
-from bot.strategy.funding_basis.engine import FundingBasisStrategy
-from bot.strategy.funding_basis.models import DecisionAction
-
-
 class DummyOms:
     """FundingBasisStrategy のテスト用に最低限のインターフェースを提供するダミーOMS。"""
 
@@ -98,6 +91,11 @@ def test_funding_basis_open_hedge_close():
     """FundingBasisStrategy が評価→発注→ヘッジ→解消まで一連の流れを辿れること。"""
 
     async def _scenario() -> None:
+        from bot.config.models import RiskConfig, StrategyFundingConfig
+        from bot.exchanges.types import FundingInfo
+        from bot.strategy.funding_basis.engine import FundingBasisStrategy
+        from bot.strategy.funding_basis.models import DecisionAction
+
         oms = DummyOms()
         risk_cfg = RiskConfig(
             max_total_notional=100000.0,
@@ -122,7 +120,12 @@ def test_funding_basis_open_hedge_close():
             estimated_slippage_bps=1.0,
         )
 
-        funding_positive = FundingInfo(symbol="BTCUSDT", current_rate=0.0, predicted_rate=0.0006, next_funding_time=None)
+        funding_positive = FundingInfo(
+            symbol="BTCUSDT",
+            current_rate=0.0,
+            predicted_rate=0.0006,
+            next_funding_time=None,
+        )
         decision_open = strategy.evaluate(funding=funding_positive, spot_price=30000.0, perp_price=30100.0)
         assert decision_open.action is DecisionAction.OPEN
         await strategy.execute(decision_open, spot_price=30000.0, perp_price=30100.0)
