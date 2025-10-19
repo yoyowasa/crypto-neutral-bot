@@ -213,6 +213,7 @@ async def _main_async(env: str, cfg_path: str | None, dry_run: bool, flatten_on_
 
     # タスク群
     tasks: list[asyncio.Task] = []
+    price_source: ExchangeGateway
 
     if dry_run:
         # Public WS（BBO/トレード）を購読し、PaperExchangeへ転送
