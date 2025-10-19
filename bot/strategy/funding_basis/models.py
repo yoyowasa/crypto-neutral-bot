@@ -31,6 +31,7 @@ class Decision:
     delta_to_neutral: float = 0.0
 
 
+# これは何をする関数？Fundingレートを年率に換算する
 def annualize_rate(rate_per_period: float | None, *, period_seconds: float) -> float | None:
     """Fundingレート（期間基準）を単純年率換算する。"""
 
@@ -42,6 +43,7 @@ def annualize_rate(rate_per_period: float | None, *, period_seconds: float) -> f
     return rate_per_period * periods_per_year
 
 
+# これは何をする関数？追加で使える名目額を推定する
 def notional_candidate(
     *,
     risk: RiskConfig,
@@ -55,6 +57,7 @@ def notional_candidate(
     return max(min(remaining_total, remaining_symbol), 0.0)
 
 
+# これは何をする関数？スポットとパーペのデルタを合算する
 def net_delta_base(spot_qty: float, perp_qty: float) -> float:
     """スポットとパーペの建玉からネットデルタ（ベース数量）を計算する。"""
 
