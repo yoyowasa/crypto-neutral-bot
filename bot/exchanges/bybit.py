@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import json
 import time
+from contextlib import suppress  # これは何をするimport？→ close時の例外を握りつぶして穏当に終了する
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Awaitable, Callable
@@ -412,3 +413,29 @@ class BybitGateway(ExchangeGateway):
                 await asyncio.gather(_ping_loop(), _recv_loop())
         except Exception as e:  # noqa: BLE001
             raise WsDisconnected(f"public ws error: {e}") from e
+
+    async def close(self) -> None:
+        """これは何をする関数？
+        → ccxtの非同期クライアントや保持中のWebSocketをクローズし、接続リーク警告を防ぎます。
+        """
+
+        # ccxt async exchange（推定される属性名を広めに走査）
+        for name in ("_ccxt", "ccxt", "_rest", "rest", "exchange", "_exchange"):
+            ex = getattr(self, name, None)
+            if ex is not None:
+                close = getattr(ex, "close", None)
+                if callable(close):
+                    try:
+                        await close()
+                    except TypeError:
+                        # 同期closeの可能性
+                        close()
+                    except Exception:
+                        pass
+
+        # WebSocketクライアントがあれば穏当に閉じる
+        for name in ("_ws_public", "_ws_private", "ws_public", "ws_private"):
+            ws = getattr(self, name, None)
+            if ws is not None:
+                with suppress(Exception):
+                    await ws.close()
