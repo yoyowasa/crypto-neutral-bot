@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Iterable
 
 from loguru import logger
@@ -132,7 +132,7 @@ class MetricsLogger:
 
         return _Holdings(spot_qty=spot_qty, perp_long_qty=perp_long, perp_short_qty=perp_short)
 
-    async def _estimate_daily_pnl(self, day: datetime.date) -> tuple[float, float]:
+    async def _estimate_daily_pnl(self, day: date) -> tuple[float, float]:
         """これは何をする関数？
         → 指定日（UTC）の Funding 実現PnL合計と、TradeLogの手数料合計を返します（MVP）。
         """
