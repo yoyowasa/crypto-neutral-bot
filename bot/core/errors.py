@@ -22,5 +22,9 @@ class ConfigError(Exception):
     """設定ファイルや環境変数の不備があるときの例外。"""
 
 
+class DataError(Exception):
+    """受信/読込データの形式不正・値異常を表す例外。"""
+
+
 class RetryGiveup(Exception):
     """再試行の上限に達してギブアップしたことを示す例外。"""
