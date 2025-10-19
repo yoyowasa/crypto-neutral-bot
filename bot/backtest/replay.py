@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -11,15 +11,14 @@ import pandas as pd
 from loguru import logger
 
 from bot.config.loader import load_config
-from bot.config.models import StrategyFundingConfig, RiskConfig
+from bot.config.models import RiskConfig, StrategyFundingConfig
 from bot.data.repo import Repo
 from bot.exchanges.base import ExchangeGateway
-from bot.exchanges.types import FundingInfo, Balance, Position, Order, OrderRequest
+from bot.exchanges.types import Balance, FundingInfo, Order, OrderRequest, Position
 from bot.oms.engine import OmsEngine
 from bot.oms.fill_sim import PaperExchange
 from bot.risk.guards import RiskManager
 from bot.strategy.funding_basis.engine import FundingBasisStrategy
-
 
 # ===== 価格フィード =====
 
@@ -67,7 +66,10 @@ class CsvPriceFeed:
         ser = df[ts_col]
         if pd.api.types.is_numeric_dtype(ser):
             # 13桁→ms、10桁→秒
-            ser = pd.to_datetime(ser, unit="ms", utc=True) if ser.max() > 1e12 else pd.to_datetime(ser, unit="s", utc=True)
+            if ser.max() > 1e12:
+                ser = pd.to_datetime(ser, unit="ms", utc=True)
+            else:
+                ser = pd.to_datetime(ser, unit="s", utc=True)
         else:
             ser = pd.to_datetime(ser, utc=True)
         df["_ts"] = ser.dt.tz_convert("UTC")
@@ -131,7 +133,7 @@ class FundingSchedule:
                 raise ValueError(f"missing column in funding csv: {k}")
         ts = pd.to_datetime(df[cols["ts"]], utc=True)
         out: list[FundingRateEvent] = []
-        for (t, sym, r) in zip(ts, df[cols["symbol"]], df[cols["rate"]]):
+        for (t, sym, r) in zip(ts, df[cols["symbol"]], df[cols["rate"]], strict=False):
             out.append(FundingRateEvent(ts=t.to_pydatetime(), symbol=str(sym), rate=float(r)))
         out.sort(key=lambda x: (x.ts, x.symbol))
         return out
@@ -221,7 +223,9 @@ class ReplayDataSource(ExchangeGateway):
     async def place_order(self, req: OrderRequest) -> Order:  # pragma: no cover - 未使用
         raise NotImplementedError
 
-    async def cancel_order(self, order_id: str | None = None, client_id: str | None = None):  # pragma: no cover - 未使用
+    async def cancel_order(
+        self, order_id: str | None = None, client_id: str | None = None
+    ):  # pragma: no cover - 未使用
         raise NotImplementedError
 
     async def subscribe_private(self, callbacks):  # pragma: no cover - 未使用
@@ -412,7 +416,12 @@ class BacktestRunner:
         trades_today = [t for t in tt if t.ts.date().isoformat() == date_utc]
         net = sum(f.realized_pnl for f in funding_today) - sum(t.fee for t in trades_today)
 
-        return BacktestResult(date=date_utc, funding_events=len(funding_today), trades=len(trades_today), net_pnl=float(net))
+        return BacktestResult(
+            date=date_utc,
+            funding_events=len(funding_today),
+            trades=len(trades_today),
+            net_pnl=float(net),
+        )
 
 
 # ===== CLI（任意実行） =====
@@ -421,7 +430,11 @@ class BacktestRunner:
 def main() -> None:
     """これは何をする関数？
     → コマンドラインから1日リプレイを実行します。
-       例：poetry run python -m bot.backtest.replay --prices data/prices.csv --funding data/funding.csv --date 2025-01-01
+       例：
+         poetry run python -m bot.backtest.replay \
+           --prices data/prices.csv \
+           --funding data/funding.csv \
+           --date 2025-01-01
     """
 
     parser = argparse.ArgumentParser(description="Backtest 1-day replay (paper fill from CSV/Parquet)")

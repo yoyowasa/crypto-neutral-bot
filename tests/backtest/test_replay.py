@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 import pandas as pd
 import pytest
 
-from bot.config.models import RiskConfig, StrategyFundingConfig
 from bot.backtest.replay import BacktestRunner, CsvPriceFeed, FundingSchedule
+from bot.config.models import RiskConfig, StrategyFundingConfig
 
 
 @pytest.mark.asyncio
@@ -74,4 +72,3 @@ async def test_backtest_replay_one_day(tmp_path):
     # +rate で perp short（想定）なら受取がプラス寄与になる
     # 厳密な金額までは検証しない（コストを入れていないため）
     assert isinstance(res.net_pnl, float)
-
