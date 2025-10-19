@@ -17,6 +17,26 @@ def test_parse_ts_int_ms() -> None:
     assert abs((parsed - now).total_seconds()) < 1.0
 
 
+def test_parse_ts_int_seconds() -> None:
+    """秒エポック→UTC datetime に変換できること"""
+    from bot.core.time import parse_exchange_ts, utc_now
+
+    now = utc_now()
+    sec = int(now.timestamp())
+    parsed = parse_exchange_ts(sec)
+    expected = datetime.fromtimestamp(sec, tz=timezone.utc)
+    assert abs((parsed - expected).total_seconds()) < 1.0
+
+
+def test_parse_ts_naive_datetime() -> None:
+    """タイムゾーンなし datetime をUTCと見なして変換できること"""
+    from bot.core.time import parse_exchange_ts
+
+    naive = datetime(2024, 1, 2, 3, 4, 5)
+    parsed = parse_exchange_ts(naive)
+    assert parsed == naive.replace(tzinfo=timezone.utc)
+
+
 @pytest.mark.asyncio
 async def test_sleep_until_now_returns_quickly() -> None:
     """現在時刻を指定した sleep_until がすぐ返ること"""
@@ -24,6 +44,18 @@ async def test_sleep_until_now_returns_quickly() -> None:
 
     start = utc_now()
     await sleep_until(start)
+    end = utc_now()
+    assert (end - start).total_seconds() < 0.5
+
+
+@pytest.mark.asyncio
+async def test_sleep_until_past_returns_immediately() -> None:
+    """過去時刻を指定した sleep_until が遅延なく返ること"""
+    from bot.core.time import sleep_until, utc_now
+
+    start = utc_now()
+    past = start - timedelta(seconds=10)
+    await sleep_until(past)
     end = utc_now()
     assert (end - start).total_seconds() < 0.5
 
