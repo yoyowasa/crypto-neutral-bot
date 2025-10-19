@@ -18,3 +18,12 @@ repos:
       - id: mypy
         files: ^bot/
         additional_dependencies: []
+
+  - repo: local
+    hooks:
+      - id: progress-snapshot
+        name: progress-snapshot  # これは何をするフック？→ コミット完了後に進行状況を docs/progress.md へ追記する
+        entry: python -m bot.tools.progress_logger
+        language: system
+        stages: [post-commit]
+        pass_filenames: false

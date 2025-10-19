@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Awaitable, Callable
 
-import ccxt.async_support as ccxt  # CCXT の async 版を使う（REST はこれで十分）
+import ccxt.async_support as ccxt_async  # これは何をするimport？→ ccxtの非同期版を使ってRESTクライアントを1つだけ持つ
 import websockets
 
 from bot.core.errors import ExchangeError, RateLimitError, WsDisconnected
@@ -38,7 +38,8 @@ class BybitGateway(ExchangeGateway):
         self._auth = _Auth(api_key=api_key, api_secret=api_secret, testnet=(environment != "mainnet"))
 
         # --- REST (CCXT) 初期化 ---
-        self._rest = ccxt.bybit(
+        # これは何をする初期化？→ ccxtの非同期クライアントを1つだけ生成し、全REST呼び出しで共有する
+        self._ccxt = ccxt_async.bybit(
             {
                 "apiKey": api_key,
                 "secret": api_secret,
@@ -49,10 +50,13 @@ class BybitGateway(ExchangeGateway):
                 },
             }
         )
-        # テストネット切替（Bybit は CCXT の sandbox mode で testnet に切り替わる）
-        # 参考: CCXT manual set_sandbox_mode
-        if self._auth.testnet:
-            self._rest.set_sandbox_mode(True)
+        # Testnet のときはサンドボックスを有効化
+        with_sandbox = (environment or "").lower() == "testnet"
+        try:
+            self._ccxt.set_sandbox_mode(with_sandbox)
+        except Exception:
+            pass
+
 
         # --- WS エンドポイント（Bybit v5 公式・要確認 & 必要に応じて linear/inverse/spot を選択） ---
         # Public:
@@ -118,7 +122,7 @@ class BybitGateway(ExchangeGateway):
         """これは何をする関数？→ 残高の一覧を返す（0は省く）"""
 
         try:
-            bal = await self._rest.fetch_balance()
+            bal = await self._ccxt.fetch_balance()
             out: list[Balance] = []
             for asset, info in bal.get("total", {}).items():
                 total = float(info)
@@ -135,7 +139,7 @@ class BybitGateway(ExchangeGateway):
 
         try:
             # Bybit は symbol 指定なしでも返る。なければ空配列。
-            pos_list = await self._rest.fetch_positions()
+            pos_list = await self._ccxt.fetch_positions()
             out: list[Position] = []
             for p in pos_list or []:
                 size = float(p.get("contracts") or p.get("info", {}).get("size") or 0.0)
@@ -164,9 +168,9 @@ class BybitGateway(ExchangeGateway):
         try:
             if symbol:
                 ccxt_sym, _kind = self._to_ccxt_symbol(symbol)
-                oo = await self._rest.fetch_open_orders(symbol=ccxt_sym)
+                oo = await self._ccxt.fetch_open_orders(symbol=ccxt_sym)
             else:
-                oo = await self._rest.fetch_open_orders()
+                oo = await self._ccxt.fetch_open_orders()
             out: list[Order] = []
             for o in oo or []:
                 out.append(
@@ -201,7 +205,7 @@ class BybitGateway(ExchangeGateway):
                 params["clientOrderId"] = req.client_id  # TODO: 要API確認
 
             price = req.price if req.type == "limit" else None
-            created = await self._rest.create_order(
+            created = await self._ccxt.create_order(
                 symbol=ccxt_sym,
                 type=req.type,
                 side=req.side,
@@ -216,7 +220,7 @@ class BybitGateway(ExchangeGateway):
                 filled_qty=float(created.get("filled", 0.0)),
                 avg_fill_price=float(created.get("average", 0.0)) if created.get("average") is not None else None,
             )
-        except ccxt.RateLimitExceeded as e:
+        except ccxt_async.RateLimitExceeded as e:
             raise RateLimitError(str(e)) from e
         except Exception as e:  # noqa: BLE001
             raise ExchangeError(f"place_order failed: {e}") from e
@@ -230,13 +234,13 @@ class BybitGateway(ExchangeGateway):
                 params["clientOrderId"] = client_id  # Bybitの orderLinkId にマップされる想定（要API確認）
             # CCXT は symbol が必要な場合があるため、未指定なら全キャンセル系を検討するが、MVPは注文ID系を優先
             if order_id:
-                await self._rest.cancel_order(id=order_id, symbol=None, params=params)
+                await self._ccxt.cancel_order(id=order_id, symbol=None, params=params)
             elif client_id:
                 # 一部CCXT実装では symbol 必須のことがあるため、注文一覧から検索→cancel でも良い
-                await self._rest.cancel_order(id=None, symbol=None, params=params)
+                await self._ccxt.cancel_order(id=None, symbol=None, params=params)
             else:
                 raise ExchangeError("cancel_order requires order_id or client_id")
-        except ccxt.RateLimitExceeded as e:
+        except ccxt_async.RateLimitExceeded as e:
             raise RateLimitError(str(e)) from e
         except Exception as e:  # noqa: BLE001
             raise ExchangeError(f"cancel_order failed: {e}") from e
@@ -246,7 +250,7 @@ class BybitGateway(ExchangeGateway):
 
         try:
             ccxt_sym, _kind = self._to_ccxt_symbol(symbol)
-            t = await self._rest.fetch_ticker(ccxt_sym)
+            t = await self._ccxt.fetch_ticker(ccxt_sym)
             # last を優先、なければ bid/ask の中間、さらにだめなら mark
             last = t.get("last")
             if last is not None:
@@ -275,7 +279,7 @@ class BybitGateway(ExchangeGateway):
             next_time = None
 
             try:
-                fr = await self._rest.fetch_funding_rate(ccxt_sym)
+                fr = await self._ccxt.fetch_funding_rate(ccxt_sym)
                 current_rate = float(fr.get("fundingRate")) if fr.get("fundingRate") is not None else None
                 predicted_rate = float(fr.get("nextFundingRate")) if fr.get("nextFundingRate") is not None else None
                 nft = fr.get("nextFundingTimestamp")
@@ -283,7 +287,7 @@ class BybitGateway(ExchangeGateway):
                     next_time = parse_exchange_ts(nft)
             except Exception:
                 # フォールバック：ティッカー側
-                t = await self._rest.fetch_ticker(ccxt_sym)
+                t = await self._ccxt.fetch_ticker(ccxt_sym)
                 info = t.get("info", {})
                 if "fundingRate" in info:
                     current_rate = float(info.get("fundingRate"))
@@ -357,7 +361,15 @@ class BybitGateway(ExchangeGateway):
                         if cb:
                             await cb(msg)
 
-                await asyncio.gather(_ping_loop(), _recv_loop())
+                try:
+                    # これは何をする処理？→ ping と recv を並行実行し続ける
+                    await asyncio.gather(_ping_loop(), _recv_loop())
+                finally:
+                    # これは何をする処理？→ タスクキャンセルや例外時でも必ずWSを閉じる
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
         except Exception as e:  # noqa: BLE001
             raise WsDisconnected(f"private ws error: {e}") from e
 
@@ -409,6 +421,41 @@ class BybitGateway(ExchangeGateway):
                             if cb:
                                 await cb(msg)
 
-                await asyncio.gather(_ping_loop(), _recv_loop())
+                try:
+                    # これは何をする処理？→ ping と recv を並行実行し続ける
+                    await asyncio.gather(_ping_loop(), _recv_loop())
+                finally:
+                    # これは何をする処理？→ タスクキャンセルや例外時でも必ずWSを閉じる
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
         except Exception as e:  # noqa: BLE001
             raise WsDisconnected(f"public ws error: {e}") from e
+
+    async def close(self) -> None:
+        """これは何をする関数？
+        → ccxtの非同期クライアントや保持中のWebSocketを穏当にクローズし、未解放コネクタ警告を防ぐ。
+        """
+
+        # ccxt async exchange を明示的にクローズ
+        ex = getattr(self, "_ccxt", None)
+        if ex is not None:
+            close = getattr(ex, "close", None)
+            if callable(close):
+                try:
+                    await close()
+                except TypeError:
+                    # 同期closeの可能性
+                    close()
+                except Exception:
+                    pass
+
+        # WebSocket を持っていれば穏当に閉じる（属性名は実装に合わせて存在するものだけ）
+        for name in ("_ws_public", "_ws_private", "ws_public", "ws_private"):
+            ws = getattr(self, name, None)
+            if ws is not None:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
