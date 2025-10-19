@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import json
 import time
+from contextlib import suppress  # これは何をするimport？→ close時の例外を握りつぶして穏当に終了する
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Awaitable, Callable
