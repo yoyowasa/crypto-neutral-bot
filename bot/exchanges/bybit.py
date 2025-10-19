@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import json
 import time
+from contextlib import suppress  # これは何をするimport？→ close時の例外を握りつぶして穏当に終了する
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Awaitable, Callable
@@ -50,13 +51,13 @@ class BybitGateway(ExchangeGateway):
                 },
             }
         )
+
         # Testnet のときはサンドボックスを有効化
         with_sandbox = (environment or "").lower() == "testnet"
         try:
             self._ccxt.set_sandbox_mode(with_sandbox)
         except Exception:
             pass
-
 
         # --- WS エンドポイント（Bybit v5 公式・要確認 & 必要に応じて linear/inverse/spot を選択） ---
         # Public:
@@ -459,3 +460,4 @@ class BybitGateway(ExchangeGateway):
                     await ws.close()
                 except Exception:
                     pass
+
