@@ -54,6 +54,9 @@ class BybitGateway(ExchangeGateway):
         # 参考: CCXT manual set_sandbox_mode
         if self._auth.testnet:
             self._rest.set_sandbox_mode(True)
+        # これは何をする初期化？→ ccxtの非同期クライアントを1つだけ生成し、全REST呼び出しで共有する
+        # 既存の _rest インスタンスを _ccxt としても参照し、明示 close() の対象とする
+        self._ccxt = self._rest
 
         # --- WS エンドポイント（Bybit v5 公式・要確認 & 必要に応じて linear/inverse/spot を選択） ---
         # Public:
@@ -358,7 +361,15 @@ class BybitGateway(ExchangeGateway):
                         if cb:
                             await cb(msg)
 
-                await asyncio.gather(_ping_loop(), _recv_loop())
+                try:
+                    # これは何をする処理？→ ping と recv を並行実行し続ける
+                    await asyncio.gather(_ping_loop(), _recv_loop())
+                finally:
+                    # これは何をする処理？→ タスクキャンセルや例外時でも必ずWSを閉じる
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
         except Exception as e:  # noqa: BLE001
             raise WsDisconnected(f"private ws error: {e}") from e
 
