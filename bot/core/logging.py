@@ -26,6 +26,8 @@ def setup_logging(
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
+    normalized_level = level.upper()
+
     human_format = (
         "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
         "<level>{level: <8}</level> | {name}:{function}:{line} | {message}"
@@ -34,10 +36,9 @@ def setup_logging(
     # 人向けの読みやすいログ（回転ファイル）
     logger.add(
         str(log_path / human_filename),
-        level=level,
-        rotation="20 MB",  # ファイルサイズで回転
+        level=normalized_level,
+        rotation="10 MB",  # ファイルサイズで回転
         retention="14 days",  # 14日保持
-        compression="zip",  # 古いログをzip圧縮
         enqueue=True,  # マルチスレッド/プロセスで安全
         backtrace=True,
         diagnose=False,
@@ -47,14 +48,13 @@ def setup_logging(
     # JSON構造化ログ（1行1JSON）
     logger.add(
         str(log_path / json_filename),
-        level=level,
-        rotation="20 MB",
-        retention="14 days",
-        compression="zip",
+        level=normalized_level,
+        rotation="50 MB",
+        retention="30 days",
         enqueue=True,
         backtrace=True,
         diagnose=False,
         serialize=True,  # ← JSON出力
     )
 
-    logger.info("logging initialized: level={}, dir={}", level, log_dir)
+    logger.info("logging initialized: level={}, dir={}", normalized_level, log_dir)
