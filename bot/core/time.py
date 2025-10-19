@@ -23,7 +23,8 @@ def parse_exchange_ts(x: Any) -> datetime:
       - datetime: タイムゾーン未設定ならUTCとみなす
     """
     if isinstance(x, datetime):
-        return x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+        dt = x if x.tzinfo else x.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     if isinstance(x, (int, float)):
         ts = float(x)
         if ts > 1e12:  # 13桁（ミリ秒）
@@ -36,7 +37,10 @@ def parse_exchange_ts(x: Any) -> datetime:
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
         try:
-            return datetime.fromisoformat(s).astimezone(timezone.utc)
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
         except Exception as e:  # noqa: BLE001
             raise ValueError(f"unsupported timestamp format: {x}") from e
     raise TypeError(f"unsupported timestamp type: {type(x)}")
