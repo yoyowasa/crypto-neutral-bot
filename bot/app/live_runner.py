@@ -21,6 +21,7 @@ from bot.strategy.funding_basis.engine import FundingBasisStrategy
 
 # ===== Bybit Privateメッセージ → OMSイベント の最小変換（MVP） =====
 
+
 def _status_map(s: str | None) -> str:
     """これは何をする関数？
     → Bybitのステータス文字列をOMS内部の表現にざっくり正規化します。
@@ -73,6 +74,7 @@ async def _handle_private_execution(msg: dict, oms: OmsEngine) -> None:
 
 
 # ===== Live ランナー本体 =====
+
 
 async def _cancel_all_open_orders(ex: ExchangeGateway) -> None:
     """これは何をする関数？

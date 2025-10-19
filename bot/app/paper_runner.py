@@ -1,6 +1,7 @@
 """これは「Paperモードで戦略を回すエントリポイント」です。
 Bybit Public WSのBBOを使って疑似約定し、DBへログ/トレードを記録します。
 """
+
 from __future__ import annotations
 
 import argparse
