@@ -123,7 +123,25 @@ async def _run(config_path: str | None) -> None:
     report_task = asyncio.create_task(reporter.run_forever())
 
     # gather に参加させる
-    await asyncio.gather(ws_task, strat_task, metrics_task, report_task)
+    try:
+        # これは何をする処理？→ WS/戦略/メトリクス/レポータを並行実行するメイン待受
+        await asyncio.gather(ws_task, strat_task, metrics_task, report_task)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        # これは何をする処理？
+        # → 停止時にタスクをキャンセルして待機し、Bybit（ccxt async）を明示クローズして
+        #    "Unclosed connector" 警告を防ぐ
+        for t in (ws_task, strat_task, metrics_task, report_task):
+            t.cancel()
+        await asyncio.gather(ws_task, strat_task, metrics_task, report_task, return_exceptions=True)
+
+        close_coro = getattr(data_ex, "close", None)
+        if callable(close_coro):
+            try:
+                await close_coro()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("data_ex.close() failed: {}", e)
 
 
 def main() -> None:

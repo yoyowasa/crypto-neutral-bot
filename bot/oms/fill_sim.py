@@ -207,14 +207,55 @@ class PaperExchange(ExchangeGateway):
         topic = msg.get("topic") or ""
         if topic.startswith("orderbook."):
             symbol = topic.split(".")[-1]
-            data_list = msg.get("data") or []
-            if data_list:
-                d = data_list[0]
-                bid = float(d["b"][0][0]) if d.get("b") else None
-                ask = float(d["a"][0][0]) if d.get("a") else None
+            data_obj = msg.get("data")
+            d = None
+            if isinstance(data_obj, list):
+                d = data_obj[0] if data_obj else None
+            elif isinstance(data_obj, dict):
+                d = data_obj
+
+            if d:
+                bid = None
+                ask = None
+
+                # 標準形：b/a は [[price, size], ...] の配列
+                b = d.get("b")
+                a = d.get("a")
+                if isinstance(b, list) and b:
+                    try:
+                        bid = float(b[0][0])
+                    except Exception:
+                        bid = None
+                if isinstance(a, list) and a:
+                    try:
+                        ask = float(a[0][0])
+                    except Exception:
+                        ask = None
+
+                # 代替キー（bp/ap や bid1Price/ask1Price 等）にも対応
+                for k in ("bp", "bid1Price", "bestBidPrice"):
+                    if bid is None and d.get(k) is not None:
+                        try:
+                            bid = float(d[k])
+                        except Exception:
+                            pass
+                for k in ("ap", "ask1Price", "bestAskPrice"):
+                    if ask is None and d.get(k) is not None:
+                        try:
+                            ask = float(d[k])
+                        except Exception:
+                            pass
+
+                # BBOを更新（どちらか一方だけ得られた場合は既存値を維持）
                 async with self._lock:
-                    self._bbo[symbol] = (bid, ask)
-            # 指値の板内チェック
+                    if bid is not None or ask is not None:
+                        prev_bid, prev_ask = self._bbo.get(symbol, (None, None))
+                        self._bbo[symbol] = (
+                            bid if bid is not None else prev_bid,
+                            ask if ask is not None else prev_ask,
+                        )
+
+            # 指値の板内チェック（BBOが未更新でも安全に呼べる）
             await self._try_fill_limits(symbol)
 
         elif topic.startswith("publicTrade."):
