@@ -1,0 +1,15 @@
+git add -A
+git commit -m "chore: initial upload"   # ←必ずメッセージを入れる
+git push                                 # -u は既に済みなので不要
+
+
+code tunnel --name home-dev
+
+gitから上書き
+git fetch origin main
+git reset --hard origin/main
+検証に進む。origin/main と作業ツリーの差分がゼロか確認。
+git --no-pager diff --name-status origin/main
+# 直近コミットIDを比較して一致を確認する
+git --no-pager log -1 --oneline
+git --no-pager log -1 --oneline origin/main
