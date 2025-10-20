@@ -257,6 +257,27 @@ class OmsEngine:
             if coid:
                 self._inflight_client_ids.discard(coid)
 
+    async def reconcile_inflight_open_orders(self, symbols: list[str]) -> None:
+        """取引所に残る open 注文の client_order_id を復元して二重発注を防ぐ。
+
+        - Bybit v5 では /v5/order/realtime の各要素に orderLinkId が含まれる。
+        - 互換のため、Order オブジェクトの場合は client_order_id もしくは client_id を参照する。
+        """
+
+        for sym in symbols:
+            try:
+                open_orders = await self._ex.get_open_orders(sym)
+            except Exception:
+                open_orders = []
+
+            for o in open_orders or []:
+                if isinstance(o, dict):
+                    cid = o.get("orderLinkId") or o.get("clientOrderId") or o.get("clOrdId")
+                else:
+                    cid = getattr(o, "client_order_id", None) or getattr(o, "client_id", None)
+                if cid:
+                    self._inflight_client_ids.add(str(cid))
+
     # ---------- タイムアウト監視 ----------
 
     async def process_timeouts(self) -> None:

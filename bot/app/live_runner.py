@@ -111,7 +111,7 @@ async def _cancel_all_open_orders(ex: ExchangeGateway) -> None:
 
 
 @retryable(tries=999999, wait_initial=1.0, wait_max=30.0)
-async def _run_private_ws(ex: BybitGateway, oms: OmsEngine) -> None:
+async def _run_private_ws(ex: BybitGateway, oms: OmsEngine, *, symbols: list[str]) -> None:
     """これは何をする関数？
     → Private WS に接続し、order/execution/position を購読して OMS へ流し続けます（断線時は自動再接続）。
     """
@@ -127,6 +127,11 @@ async def _run_private_ws(ex: BybitGateway, oms: OmsEngine) -> None:
         pass
 
     await ex.subscribe_private({"order": _on_order, "execution": _on_exec, "position": _on_position})
+    # Private WS 接続直後に、取引所に残る open 注文の client_order_id を復元
+    try:
+        await oms.reconcile_inflight_open_orders(symbols)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("reconcile inflight open orders failed: {}", e)
 
 
 @retryable(tries=999999, wait_initial=1.0, wait_max=30.0)
@@ -241,7 +246,7 @@ async def _main_async(env: str, cfg_path: str | None, dry_run: bool, flatten_on_
     else:
         # Private WS：注文/約定イベントをOMSへ
         assert isinstance(trade_ex, BybitGateway)
-        tasks.append(asyncio.create_task(_run_private_ws(ex=trade_ex, oms=oms)))
+        tasks.append(asyncio.create_task(_run_private_ws(ex=trade_ex, oms=oms, symbols=cfg.strategy.symbols)))
         price_source = data_ex  # 価格はRESTのtickerで取得
 
     # 戦略ループ（数秒ごとに step、429/一時失敗はデコレータで再実行）
