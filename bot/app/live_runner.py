@@ -82,6 +82,9 @@ async def _handle_private_order(msg: dict, oms: OmsEngine) -> None:
         event["last_fill_price"] = row.get("execPrice")
         client_order_id = row.get("orderLinkId") or row.get("clOrdId") or row.get("clientOrderId") or None
         event["client_order_id"] = client_order_id
+        event["updated_at"] = (
+            row.get("updatedTime") or row.get("uTime") or row.get("updateTime") or row.get("ts") or row.get("t")
+        )  # この注文更新の発生時刻（後段で順序判定に使う）
         await oms.on_execution_event(event)
 
 
@@ -100,6 +103,9 @@ async def _handle_private_execution(msg: dict, oms: OmsEngine) -> None:
         }
         client_order_id = row.get("orderLinkId") or row.get("clOrdId") or row.get("clientOrderId") or None
         event["client_order_id"] = client_order_id
+        event["updated_at"] = (
+            row.get("execTime") or row.get("updatedTime") or row.get("uTime") or row.get("ts") or row.get("t")
+        )  # この出来の発生時刻（順序判定に使う）
         await oms.on_execution_event(event)
 
 

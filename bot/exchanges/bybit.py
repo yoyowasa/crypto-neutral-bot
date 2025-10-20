@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+import asyncio  # REST同時実行をセマフォで制御して429を予防するために使う
 import hmac
 import json
 import time
@@ -18,7 +18,10 @@ import websockets
 
 from bot.core.errors import DataError, ExchangeError, RateLimitError, WsDisconnected
 from bot.core.retry import retryable  # REST呼び出しに指数バックオフ再試行を付与するデコレータ
-from bot.core.time import parse_exchange_ts
+from bot.core.time import (
+    parse_exchange_ts,
+    utc_now,  # BBOの鮮度判定に使用
+)
 
 from .base import ExchangeGateway
 from .types import Balance, FundingInfo, Order, OrderRequest, Position
@@ -42,7 +45,7 @@ class BybitGateway(ExchangeGateway):
         self._auth = _Auth(api_key=api_key, api_secret=api_secret, testnet=(environment != "mainnet"))
 
         # --- REST (CCXT) 初期化 ---
-        self._rest = ccxt.bybit(
+        self._ccxt = ccxt.bybit(
             {
                 "apiKey": api_key,
                 "secret": api_secret,
@@ -56,10 +59,10 @@ class BybitGateway(ExchangeGateway):
         # テストネット切替（Bybit は CCXT の sandbox mode で testnet に切り替わる）
         # 参考: CCXT manual set_sandbox_mode
         if self._auth.testnet:
-            self._rest.set_sandbox_mode(True)
+            self._ccxt.set_sandbox_mode(True)
         # これは何をする初期化？→ ccxtの非同期クライアントを1つだけ生成し、全REST呼び出しで共有する
         # 既存の _rest インスタンスを _ccxt としても参照し、明示 close() の対象とする
-        self._ccxt = self._rest
+        # self._ccxt は上で作成済み
         self._symbol_category_cache: dict[str, str] = (
             {}
         )  # instruments-infoで判定したカテゴリ(spot/linear/inverse)の簡易キャッシュ
@@ -69,6 +72,10 @@ class BybitGateway(ExchangeGateway):
         self._bbo_cache: dict[str, dict] = (
             {}
         )  # 公開WS由来の最良気配(bid/ask/ts)をキャッシュしてPostOnly調整等で即時利用
+        self._bbo_max_age_ms: int = 3000  # BBO freshness threshold (ms)
+
+        self._rest_max_concurrency: int = 4  # RESTの同時実行上限。環境に応じて調整可能（429予防）
+        self._rest_semaphore = asyncio.Semaphore(self._rest_max_concurrency)  # 上限を守るセマフォ
 
         # --- WS エンドポイント（Bybit v5 公式・要確認 & 必要に応じて linear/inverse/spot を選択） ---
         # Public:
@@ -128,13 +135,23 @@ class BybitGateway(ExchangeGateway):
         }
         return mapping.get(s, s)
 
+    # ---------- REST 共通ラッパ + CCXT 経由呼び出し ----------
+
+    async def _rest(self, func, params: dict) -> dict:
+        """REST呼び出しを必ずここから通す共通関数。
+        - セマフォで同時実行を制御し、混雑時のエラー連鎖を予防する。
+        - func は ccxt のバウンドメソッド（例: self._ccxt.publicGetV5MarketTickers）
+        """
+        async with self._rest_semaphore:  # 同時実行の上限を超えないようにする
+            return await func(params)
+
     # ---------- REST 実装（CCXT） ----------
 
     async def get_balances(self) -> list[Balance]:
         """これは何をする関数？→ 残高の一覧を返す（0は省く）"""
 
         try:
-            bal = await self._rest.fetch_balance()
+            bal = await self._ccxt.fetch_balance()
             out: list[Balance] = []
             for asset, info in bal.get("total", {}).items():
                 total = float(info)
@@ -154,7 +171,7 @@ class BybitGateway(ExchangeGateway):
 
         try:
             # Bybit は symbol 指定なしでも返る。なければ空配列。
-            pos_list = await self._rest.fetch_positions()
+            pos_list = await self._ccxt.fetch_positions()
             out: list[Position] = []
             for p in pos_list or []:
                 size = float(p.get("contracts") or p.get("info", {}).get("size") or 0.0)
@@ -184,9 +201,9 @@ class BybitGateway(ExchangeGateway):
         try:
             if symbol:
                 ccxt_sym, _kind = self._to_ccxt_symbol(symbol)
-                oo = await self._rest.fetch_open_orders(symbol=ccxt_sym)
+                oo = await self._ccxt.fetch_open_orders(symbol=ccxt_sym)
             else:
-                oo = await self._rest.fetch_open_orders()
+                oo = await self._ccxt.fetch_open_orders()
             out: list[Order] = []
             for o in oo or []:
                 # convert ccxt symbol to internal format like 'BTCUSDT'
@@ -258,14 +275,47 @@ class BybitGateway(ExchangeGateway):
                 except Exception:
                     pass
             price = float(params["price"]) if ("price" in params and params["price"] is not None) else None
-            created = await self._rest.create_order(
-                symbol=ccxt_sym,
-                type=req.type,
-                side=req.side,
-                amount=float(qty_str),
-                price=price,
-                params=params,
-            )
+            try:
+                created = await self._ccxt.create_order(
+                    symbol=ccxt_sym,
+                    type=req.type,
+                    side=req.side,
+                    amount=float(qty_str),
+                    price=price,
+                    params=params,
+                )
+            except Exception as e:
+                # 冪等フォールバック: duplicate orderLinkId やネット不明時
+                coid = params.get("clientOrderId") or getattr(req, "client_order_id", None)
+                found = await self._find_existing_order(req.symbol, coid)
+                if found:
+                    # 既に同一注文が存在。found から Order を組み立てて返す（状態更新はWSが運ぶ）
+                    oid = str(found.get("orderId") or found.get("orderID") or "")
+                    status_raw = (found.get("orderStatus") or "").lower()
+                    if status_raw in {"new", "created"}:
+                        status = "open"
+                    elif status_raw in {"partiallyfilled", "partialfilled", "partially_filled", "partial"}:
+                        status = "open"
+                    elif status_raw in {"filled", "closed", "done"}:
+                        status = "closed"
+                    elif status_raw in {"canceled", "cancelled", "expired"}:
+                        status = "canceled"
+                    elif status_raw == "rejected":
+                        status = "rejected"
+                    else:
+                        status = "open"
+                    avg_p = found.get("avgPrice")
+                    return Order(
+                        symbol=req.symbol,
+                        order_id=oid or (coid or ""),
+                        client_id=coid,
+                        client_order_id=coid,
+                        status=status,
+                        filled_qty=float(found.get("cumExecQty") or 0.0),
+                        avg_fill_price=(float(str(avg_p)) if avg_p not in (None, "") else None),
+                    )
+                # 見つからなければリトライ機構へ委譲
+                raise e
             return Order(
                 symbol=req.symbol,
                 order_id=str(created.get("id") or created.get("orderId")),
@@ -289,10 +339,10 @@ class BybitGateway(ExchangeGateway):
                 params["clientOrderId"] = client_id  # Bybitの orderLinkId にマップされる想定（要API確認）
             # CCXT は symbol が必要な場合があるため、未指定なら全キャンセル系を検討するが、MVPは注文ID系を優先
             if order_id:
-                await self._rest.cancel_order(id=order_id, symbol=None, params=params)
+                await self._ccxt.cancel_order(id=order_id, symbol=None, params=params)
             elif client_id:
                 # 一部CCXT実装では symbol 必須のことがあるため、注文一覧から検索→cancel でも良い
-                await self._rest.cancel_order(id=None, symbol=None, params=params)
+                await self._ccxt.cancel_order(id=None, symbol=None, params=params)
             else:
                 raise ExchangeError("cancel_order requires order_id or client_id")
         except ccxt.RateLimitExceeded as e:
@@ -305,7 +355,7 @@ class BybitGateway(ExchangeGateway):
 
         try:
             ccxt_sym, _kind = self._to_ccxt_symbol(symbol)
-            t = await self._rest.fetch_ticker(ccxt_sym)
+            t = await self._ccxt.fetch_ticker(ccxt_sym)
             # last を優先、なければ bid/ask の中間、さらにだめなら mark
             last = t.get("last")
             if last is not None:
@@ -358,7 +408,7 @@ class BybitGateway(ExchangeGateway):
             next_time = None
 
             try:
-                fr = await self._rest.fetch_funding_rate(ccxt_sym)
+                fr = await self._ccxt.fetch_funding_rate(ccxt_sym)
                 current_rate = float(fr.get("fundingRate")) if fr.get("fundingRate") is not None else None
                 predicted_rate = float(fr.get("nextFundingRate")) if fr.get("nextFundingRate") is not None else None
                 nft = fr.get("nextFundingTimestamp")
@@ -366,7 +416,7 @@ class BybitGateway(ExchangeGateway):
                     next_time = parse_exchange_ts(nft)
             except Exception:
                 # フォールバック：ティッカー側
-                t = await self._rest.fetch_ticker(ccxt_sym)
+                t = await self._ccxt.fetch_ticker(ccxt_sym)
                 info = t.get("info", {})
                 if "fundingRate" in info:
                     current_rate = float(info.get("fundingRate"))
@@ -538,7 +588,9 @@ class BybitGateway(ExchangeGateway):
 
         category = await self._resolve_category(symbol)  # instruments-infoで正しいカテゴリを特定してからAPIを呼ぶ
         try:
-            res = await self._ccxt.publicGetV5MarketTickers({"category": category, "symbol": symbol})
+            res = await self._rest(
+                self._ccxt.publicGetV5MarketTickers, {"category": category, "symbol": symbol}
+            )  # RESTは必ず共通ラッパ経由
             items = (res or {}).get("result", {}).get("list", []) or []
             data = items[0] if items else None
         except Exception:
@@ -570,9 +622,10 @@ class BybitGateway(ExchangeGateway):
 
         if (predicted_rate is None) or (next_dt is None) or (interval_hours is None):
             try:
-                hist = await self._ccxt.publicGetV5MarketFundingHistory(
-                    {"category": category, "symbol": symbol, "limit": 1}
-                )
+                hist = await self._rest(
+                    self._ccxt.publicGetV5MarketFundingHistory,
+                    {"category": category, "symbol": symbol, "limit": 1},
+                )  # セマフォで同時実行制御
                 hlist = (hist or {}).get("result", {}).get("list", []) or []
                 last = hlist[0] if hlist else None
             except Exception:
@@ -581,7 +634,10 @@ class BybitGateway(ExchangeGateway):
             interval_minutes: int | None = None
             if interval_hours is None:
                 try:
-                    ins = await self._ccxt.publicGetV5MarketInstrumentsInfo({"category": category, "symbol": symbol})
+                    ins = await self._rest(
+                        self._ccxt.publicGetV5MarketInstrumentsInfo,
+                        {"category": category, "symbol": symbol},
+                    )  # REST共通ラッパ
                     ilist = (ins or {}).get("result", {}).get("list", []) or []
                     info = ilist[0] if ilist else None
                     if info:
@@ -624,7 +680,9 @@ class BybitGateway(ExchangeGateway):
         )
 
     @retryable()  # 取消の一過性失敗に対して自動再試行（安全に諦めず数回だけ挑戦）
-    async def cancel_order(self, symbol: str, order_id: str | None = None, client_order_id: str | None = None) -> None:
+    async def cancel_order_legacy(
+        self, symbol: str, order_id: str | None = None, client_order_id: str | None = None
+    ) -> None:
         """Bybit v5 の注文取消。
         - orderId があればそれを使う
         - なければ client_order_id（= orderLinkId）で確実に取り消す
@@ -640,7 +698,7 @@ class BybitGateway(ExchangeGateway):
             else:
                 raise DataError(f"cancel_order requires order_id or client_order_id: symbol={symbol}")
 
-            await self._ccxt.privatePostV5OrderCancel(params)
+            await self._rest(self._ccxt.privatePostV5OrderCancel, params)  # 取消も共通ラッパ経由
         except ccxt.RateLimitExceeded as e:
             raise RateLimitError(str(e)) from e
         except Exception as e:  # noqa: BLE001
@@ -658,7 +716,10 @@ class BybitGateway(ExchangeGateway):
 
         for cat_try in ("linear", "inverse", "spot"):
             try:
-                res = await self._ccxt.publicGetV5MarketInstrumentsInfo({"category": cat_try, "symbol": _api_symbol})
+                res = await self._rest(
+                    self._ccxt.publicGetV5MarketInstrumentsInfo,
+                    {"category": cat_try, "symbol": _api_symbol},
+                )
                 items = (res or {}).get("result", {}).get("list", []) or []
                 if items:
                     self._symbol_category_cache[symbol] = cat_try
@@ -691,7 +752,10 @@ class BybitGateway(ExchangeGateway):
 
         category = await self._resolve_category(symbol)
         api_symbol = symbol[:-5] if symbol.endswith("_SPOT") else symbol
-        res = await self._ccxt.publicGetV5MarketInstrumentsInfo({"category": category, "symbol": api_symbol})
+        res = await self._rest(
+            self._ccxt.publicGetV5MarketInstrumentsInfo,
+            {"category": category, "symbol": api_symbol},
+        )  # instruments-infoも共通ラッパ
         items = (res or {}).get("result", {}).get("list", []) or []
         if not items:
             raise DataError(f"instruments-info not found: symbol={symbol}")
@@ -766,7 +830,7 @@ class BybitGateway(ExchangeGateway):
         """
 
         # まずWSキャッシュのBBOを使い、無ければRESTで補う
-        bid_str, ask_str = await self.get_bbo(symbol)
+        bid_str, ask_str = await self._get_bbo_if_fresh(symbol)  # 鮮度ガード付きBBO取得（古ければRESTで補う）
         if not bid_str and not ask_str:
             return price_str  # BBOが無ければ調整しない
 
@@ -820,7 +884,9 @@ class BybitGateway(ExchangeGateway):
         category = await self._resolve_category(symbol)
         api_symbol = symbol[:-5] if symbol.endswith("_SPOT") else symbol
         try:
-            res = await self._ccxt.publicGetV5MarketTickers({"category": category, "symbol": api_symbol})
+            res = await self._rest(
+                self._ccxt.publicGetV5MarketTickers, {"category": category, "symbol": api_symbol}
+            )  # BBOのRESTフォールバックも統一
             item = ((res or {}).get("result", {}) or {}).get("list", [])[:1]
             row = item[0] if item else {}
             bid = row.get("bid1Price")
@@ -828,3 +894,109 @@ class BybitGateway(ExchangeGateway):
             return (str(bid) if bid is not None else None, str(ask) if ask is not None else None)
         except Exception:
             return (None, None)
+
+    async def _get_bbo_if_fresh(self, symbol: str) -> tuple[str | None, str | None]:
+        """WSキャッシュのBBOが新しいときだけ返し、古いときはRESTのTickerで補う。"""
+        cached = self._bbo_cache.get(symbol)
+        if cached:
+            ts_raw = cached.get("ts")
+            try:
+                ts_dt = parse_exchange_ts(ts_raw)
+                age_ms = int((utc_now() - ts_dt).total_seconds() * 1000)
+            except Exception:
+                age_ms = None
+
+            if (age_ms is not None) and (age_ms <= self._bbo_max_age_ms):
+                bid = cached.get("bid")
+                ask = cached.get("ask")
+                return (str(bid) if bid is not None else None, str(ask) if ask is not None else None)
+
+        # 古い/時刻不明ならRESTで補う
+        category = await self._resolve_category(symbol)
+        api_symbol = symbol[:-5] if symbol.endswith("_SPOT") else symbol
+        try:
+            res = await self._rest(
+                self._ccxt.publicGetV5MarketTickers, {"category": category, "symbol": api_symbol}
+            )  # 鮮度ガードのREST補完も共通
+            item = ((res or {}).get("result", {}) or {}).get("list", [])[:1]
+            row = item[0] if item else {}
+            bid = row.get("bid1Price")
+            ask = row.get("ask1Price")
+            return (str(bid) if bid is not None else None, str(ask) if ask is not None else None)
+        except Exception:
+            return (None, None)
+
+    async def _find_existing_order(self, symbol: str, client_order_id: str | None) -> dict | None:
+        """orderLinkIdで既存の注文をBybit v5 /v5/order/realtimeから一件だけ探す。無ければNone。
+        ネット揺れやduplicate orderLinkIdエラー時の冪等フォールバックに使用。
+        """
+        if not client_order_id:
+            return None
+        category = await self._resolve_category(symbol)
+        api_symbol = symbol[:-5] if symbol.endswith("_SPOT") else symbol
+        try:
+            res = await self._rest(
+                self._ccxt.privateGetV5OrderRealtime,
+                {
+                    "category": category,
+                    "symbol": api_symbol,
+                    "orderLinkId": client_order_id,
+                },
+            )  # 既存照会もラッパ経由
+            items = (res or {}).get("result", {}).get("list", []) or []
+            return items[0] if items else None
+        except Exception:
+            return None
+
+    async def _is_order_still_open(self, symbol: str, order_id: str | None, client_order_id: str | None) -> bool:
+        """Bybit v5 /v5/order/realtime で、対象注文がまだ open かどうかを確認する。
+        - orderId があればそれを最優先で検索、なければ orderLinkId（client_order_id）で検索
+        - 0 件なら open ではない（＝既に Filled/Cancelled 等）
+        - 失敗時は安全側に True（まだ open かも）
+        """
+        category = await self._resolve_category(symbol)
+        api_symbol = symbol[:-5] if symbol.endswith("_SPOT") else symbol
+        params: dict[str, object] = {"category": category, "symbol": api_symbol}
+        if order_id:
+            params["orderId"] = order_id
+        elif client_order_id:
+            params["orderLinkId"] = client_order_id
+        else:
+            # 識別子が無ければ open ではない扱い（冪等化のため）
+            return False
+        try:
+            res = await self._rest(self._ccxt.privateGetV5OrderRealtime, params)  # open判定も共通ラッパ
+            items = (res or {}).get("result", {}).get("list", []) or []
+            return bool(items)
+        except Exception:
+            return True
+
+    @retryable()
+    async def cancel_order(self, symbol: str, order_id: str | None = None, client_order_id: str | None = None) -> None:
+        """Bybit v5 取消の冪等化対応。
+        - 通常は /v5/order/cancel を呼ぶ
+        - 失敗時（not found/duplicate/ネット断など）は /v5/order/realtime で open を確認し、残っていなければ成功扱い
+        """
+
+        category = await self._resolve_category(symbol)
+        params: dict[str, Any] = {"category": category, "symbol": symbol}
+        if order_id:
+            params["orderId"] = order_id
+        elif client_order_id:
+            params["orderLinkId"] = client_order_id
+        else:
+            raise DataError(f"cancel_order requires order_id or client_order_id: symbol={symbol}")
+
+        try:
+            await self._rest(self._ccxt.privatePostV5OrderCancel, params)  # 取消も共通ラッパ経由
+            return
+        except Exception as e:  # noqa: BLE001
+            try:
+                still_open = await self._is_order_still_open(symbol, order_id, client_order_id)
+            except Exception:
+                still_open = True
+            if not still_open:
+                return
+            if isinstance(e, ccxt.RateLimitExceeded):
+                raise RateLimitError(str(e)) from e
+            raise ExchangeError(f"cancel_order failed: {e}") from e

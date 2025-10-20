@@ -11,7 +11,10 @@ from bot.core.errors import (
     ExchangeError,
     RiskBreach,  # 二重発注を止めるための制御用エラー（リスク違反として扱う）
 )
-from bot.core.time import utc_now
+from bot.core.time import (
+    parse_exchange_ts,  # 取引所/WSの時刻表現をUTC awareに直すため（順序判定で使う）
+    utc_now,
+)
 from bot.data.repo import Repo
 from bot.exchanges.base import ExchangeGateway
 from bot.exchanges.types import Order, OrderRequest
@@ -37,6 +40,9 @@ class OmsEngine:
         self._repo = repo
         self._cfg = cfg or OmsConfig()
         self._orders: dict[str, ManagedOrder] = {}  # key: client_id
+        self._last_event_ms: dict[str, int] = (
+            {}
+        )  # 注文ごとの最終更新時刻（ms）を覚えて、古いWSイベントを無視するためのメモ
         self._inflight_client_ids: set[str] = set()  # 送信済みのclient注文IDを記録して二重発注を防ぐメモ帳
 
     # ---------- 内部: client_id 生成 ----------
@@ -183,6 +189,29 @@ class OmsEngine:
         → 取引所からの注文・約定イベントを受け取り、OMS内部状態を更新します。
         """
 
+        # --- WSイベント順序ガード：古い更新は捨てる ---
+        cid_e = (
+            event.get("client_order_id") if isinstance(event, dict) else getattr(event, "client_order_id", None)
+        )  # 注文を特定するID
+        oid = (
+            event.get("order_id") if isinstance(event, dict) else getattr(event, "order_id", None)
+        )  # 取引所注文ID（補助）
+        eid = cid_e or oid  # まずはclient_order_idを優先。無ければorder_idで代用。
+        ts_raw = (
+            event.get("updated_at") if isinstance(event, dict) else getattr(event, "updated_at", None)
+        )  # このイベントの更新時刻（WS由来）
+        event_ms = None
+        if ts_raw not in (None, ""):
+            try:
+                event_ms = int(parse_exchange_ts(ts_raw).timestamp() * 1000)  # UTC awareに正規化→msへ
+            except Exception:
+                event_ms = None  # 解析できない時は判定不能として通す
+
+        if eid and (event_ms is not None):
+            last_ms = self._last_event_ms.get(eid)
+            if (last_ms is not None) and (event_ms < last_ms):
+                return  # すでにより新しい状態を処理済み。古いイベントは静かに無視する
+
         cid = event.get("client_id") or event.get("clientOrderId") or event.get("orderLinkId") or event.get("clientId")
         if not cid or cid not in self._orders:
             logger.debug("OMS on_execution_event: unknown client_id, event={}", event)
@@ -256,6 +285,10 @@ class OmsEngine:
         if st in ("FILLED", "CANCELED", "CANCELLED", "REJECTED"):
             if coid:
                 self._inflight_client_ids.discard(coid)
+
+        # --- 最終時刻の更新（今回のイベントを最新として記録） ---
+        if eid and (event_ms is not None):
+            self._last_event_ms[eid] = event_ms  # 今回のイベントを「最新」として記録する（次回の順序判定に使う）
 
     async def reconcile_inflight_open_orders(self, symbols: list[str]) -> None:
         """取引所に残る open 注文の client_order_id を復元して二重発注を防ぐ。
