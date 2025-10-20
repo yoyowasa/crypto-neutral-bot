@@ -66,6 +66,9 @@ class BybitGateway(ExchangeGateway):
         self._instrument_info_cache: dict[str, dict] = (
             {}
         )  # instruments-infoのtickSize/qtyStep等をキャッシュしてREST前の丸めに使う
+        self._bbo_cache: dict[str, dict] = (
+            {}
+        )  # 公開WS由来の最良気配(bid/ask/ts)をキャッシュしてPostOnly調整等で即時利用
 
         # --- WS エンドポイント（Bybit v5 公式・要確認 & 必要に応じて linear/inverse/spot を選択） ---
         # Public:
@@ -762,29 +765,10 @@ class BybitGateway(ExchangeGateway):
         取得失敗などの場合は入力価格をそのまま返す。
         """
 
-        try:
-            category = await self._resolve_category(symbol)
-        except Exception:
-            category = None
-
-        # API用のsymbol（_SPOT除去）
-        api_symbol = symbol[:-5] if symbol.endswith("_SPOT") else symbol
-
-        best_bid = None
-        best_ask = None
-        if category:
-            try:
-                res = await self._ccxt.publicGetV5MarketTickers({"category": category, "symbol": api_symbol})
-                item = ((res or {}).get("result", {}) or {}).get("list", [])
-                row = item[0] if item else {}
-                best_bid = row.get("bid1Price")
-                best_ask = row.get("ask1Price")
-            except Exception:
-                best_bid = None
-                best_ask = None
-
-        if not best_bid and not best_ask:
-            return price_str
+        # まずWSキャッシュのBBOを使い、無ければRESTで補う
+        bid_str, ask_str = await self.get_bbo(symbol)
+        if not bid_str and not ask_str:
+            return price_str  # BBOが無ければ調整しない
 
         try:
             info = await self._get_instrument_info(symbol)
@@ -798,17 +782,17 @@ class BybitGateway(ExchangeGateway):
         px = Decimal(str(price_str))
         side_u = (side or "").upper()
 
-        if side_u == "BUY" and best_ask:
+        if side_u == "BUY" and ask_str:
             try:
-                ask = Decimal(str(best_ask))
+                ask = Decimal(str(ask_str))
                 target = ask - tick_d
                 if px > target:
                     px = target
             except Exception:
                 pass
-        elif side_u == "SELL" and best_bid:
+        elif side_u == "SELL" and bid_str:
             try:
-                bid = Decimal(str(best_bid))
+                bid = Decimal(str(bid_str))
                 target = bid + tick_d
                 if px < target:
                     px = target
@@ -817,3 +801,30 @@ class BybitGateway(ExchangeGateway):
 
         px = self._quantize_step(px, tick_d)
         return self._dec_to_str(px)
+
+    def update_bbo(
+        self, symbol: str, bid: str | float | None, ask: str | float | None, ts: int | str | None = None
+    ) -> None:
+        """公開WSから届いた最良気配をキャッシュする（価格は文字列でも数値でもOK）。"""
+        self._bbo_cache[symbol] = {"bid": bid, "ask": ask, "ts": ts}
+
+    async def get_bbo(self, symbol: str) -> tuple[str | None, str | None]:
+        """キャッシュ済みBBOを返し、無ければRESTのTickerで補う（bid, ask）。"""
+        cached = self._bbo_cache.get(symbol)
+        if cached and (cached.get("bid") is not None or cached.get("ask") is not None):
+            bid = cached.get("bid")
+            ask = cached.get("ask")
+            return (str(bid) if bid is not None else None, str(ask) if ask is not None else None)
+
+        # フォールバック：RESTのTicker
+        category = await self._resolve_category(symbol)
+        api_symbol = symbol[:-5] if symbol.endswith("_SPOT") else symbol
+        try:
+            res = await self._ccxt.publicGetV5MarketTickers({"category": category, "symbol": api_symbol})
+            item = ((res or {}).get("result", {}) or {}).get("list", [])[:1]
+            row = item[0] if item else {}
+            bid = row.get("bid1Price")
+            ask = row.get("ask1Price")
+            return (str(bid) if bid is not None else None, str(ask) if ask is not None else None)
+        except Exception:
+            return (None, None)

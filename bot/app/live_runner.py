@@ -169,6 +169,46 @@ async def _run_public_ws_for_paper(data_ex: BybitGateway, paper_ex: PaperExchang
 
     async def _orderbook_cb(msg: dict) -> None:
         await paper_ex.handle_public_msg(msg)
+        # BybitGateway にもBBOをキャッシュさせる（PostOnly調整の低遅延化）
+        try:
+            topic = (msg.get("topic") or "").lower()
+            if topic.startswith("orderbook"):
+                data_obj = msg.get("data")
+                item = None
+                if isinstance(data_obj, list):
+                    item = data_obj[0] if data_obj else None
+                elif isinstance(data_obj, dict):
+                    item = data_obj
+                if item:
+                    # b/a は [[price, size], ...] の場合と、bp/ap/ bid1Price/ask1Price の場合がある
+                    bid = None
+                    ask = None
+                    b = item.get("b")
+                    a = item.get("a")
+                    if isinstance(b, list) and b:
+                        try:
+                            bid = b[0][0]
+                        except Exception:
+                            bid = None
+                    if isinstance(a, list) and a:
+                        try:
+                            ask = a[0][0]
+                        except Exception:
+                            ask = None
+                    if bid is None:
+                        bid = item.get("bp") or item.get("bid1Price")
+                    if ask is None:
+                        ask = item.get("ap") or item.get("ask1Price")
+                    sym = item.get("symbol") or item.get("s")
+                    if not sym and "." in topic:
+                        try:
+                            sym = topic.split(".")[-1]
+                        except Exception:
+                            sym = None
+                    if sym and (bid is not None or ask is not None):
+                        data_ex.update_bbo(sym, bid, ask, item.get("ts") or item.get("t"))
+        except Exception:
+            pass
 
     await data_ex.subscribe_public(
         symbols=symbols,
