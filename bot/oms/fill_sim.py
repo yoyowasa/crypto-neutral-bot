@@ -172,13 +172,14 @@ class PaperExchange(ExchangeGateway):
         logger.warning("paper: unsupported order type={}, leave as new", req.type)
         return Order(order_id=po.order_id, client_id=po.client_id, status="new", filled_qty=0.0, avg_fill_price=None)
 
-    async def cancel_order(self, order_id: str | None = None, client_id: str | None = None) -> None:
+    async def cancel_order(self, symbol: str, order_id: str | None = None, client_order_id: str | None = None) -> None:
         """これは何をする関数？→ ローカル注文を取消し、OMSへ 'canceled' を通知します。"""
 
         async with self._lock:
             po = None
-            if client_id and client_id in self._orders:
-                po = self._orders[client_id]
+            cid = client_order_id
+            if cid and cid in self._orders:
+                po = self._orders[cid]
             elif order_id and order_id in self._order_by_id:
                 po = self._order_by_id[order_id]
             if not po or po.status in {"filled", "canceled"}:

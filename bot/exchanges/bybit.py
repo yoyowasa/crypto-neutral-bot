@@ -8,13 +8,14 @@ import json
 import time
 from contextlib import suppress  # これは何をするimport？→ close時の例外を握りつぶして穏当に終了する
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import Any, Awaitable, Callable
 
 import ccxt.async_support as ccxt  # CCXT の async 版を使う（REST はこれで十分）
 import websockets
 
-from bot.core.errors import ExchangeError, RateLimitError, WsDisconnected
+from bot.core.errors import DataError, ExchangeError, RateLimitError, WsDisconnected
 from bot.core.time import parse_exchange_ts
 
 from .base import ExchangeGateway
@@ -200,10 +201,9 @@ class BybitGateway(ExchangeGateway):
                 params["reduceOnly"] = True
             if req.post_only:
                 params["postOnly"] = True
-            if req.client_id:
-                # CCXT の unified: clientOrderId（Bybit は orderLinkId にマップされる想定）
-                params["clientOrderId"] = req.client_id  # TODO: 要API確認
-
+            coid = getattr(req, "client_order_id", None) or req.client_id
+            if coid:
+                params["clientOrderId"] = coid
             price = req.price if req.type == "limit" else None
             created = await self._rest.create_order(
                 symbol=ccxt_sym,
@@ -216,6 +216,7 @@ class BybitGateway(ExchangeGateway):
             return Order(
                 order_id=str(created.get("id") or created.get("orderId")),
                 client_id=created.get("clientOrderId"),
+                client_order_id=created.get("clientOrderId"),
                 status=self._order_status_from_ccxt(created.get("status") or "open"),
                 filled_qty=float(created.get("filled", 0.0)),
                 avg_fill_price=float(created.get("average", 0.0)) if created.get("average") is not None else None,
@@ -225,7 +226,7 @@ class BybitGateway(ExchangeGateway):
         except Exception as e:  # noqa: BLE001
             raise ExchangeError(f"place_order failed: {e}") from e
 
-    async def cancel_order(self, order_id: str | None = None, client_id: str | None = None) -> None:
+    async def cancel_order_old(self, order_id: str | None = None, client_id: str | None = None) -> None:
         """これは何をする関数？→ order_id か client_id の指定で注文を取り消す"""
 
         try:
@@ -265,7 +266,7 @@ class BybitGateway(ExchangeGateway):
         except Exception as e:  # noqa: BLE001
             raise ExchangeError(f"get_ticker failed: {e}") from e
 
-    async def get_funding_info(self, symbol: str) -> FundingInfo:
+    async def get_funding_info_old(self, symbol: str) -> FundingInfo:
         """これは何をする関数？
         → Funding レートをまとめて返す（predicted は取得元により空もあり）。
            - CCXT fetchFundingRate を優先（fundingRate / nextFundingRate / nextFundingTimestamp）
@@ -450,3 +451,117 @@ class BybitGateway(ExchangeGateway):
             if ws is not None:
                 with suppress(Exception):
                     await ws.close()
+
+    async def get_funding_info(self, symbol: str) -> FundingInfo:
+        """Bybit v5 から資金調達レートと次回時刻を取ってくる関数。
+        まずは Ticker（早い・軽い）で取り、足りなければ履歴+仕様でやさしく補完する。
+        """
+
+        category = "linear" if symbol.endswith(("USDT", "USDC")) else "inverse"
+        try:
+            res = await self._ccxt.publicGetV5MarketTickers({"category": category, "symbol": symbol})
+            items = (res or {}).get("result", {}).get("list", []) or []
+            data = items[0] if items else None
+        except Exception:
+            data = None
+
+        predicted_rate: float | None = None
+        next_dt: datetime | None = None
+        interval_hours: int | None = None
+
+        if data:
+            raw_rate = data.get("fundingRate")
+            raw_next = data.get("nextFundingTime")
+            raw_interval_h = data.get("fundingIntervalHour")
+            if raw_rate not in (None, ""):
+                try:
+                    predicted_rate = float(raw_rate)
+                except Exception:
+                    predicted_rate = None
+            if raw_next not in (None, ""):
+                try:
+                    next_dt = parse_exchange_ts(raw_next)
+                except Exception:
+                    next_dt = None
+            if raw_interval_h not in (None, ""):
+                try:
+                    interval_hours = int(raw_interval_h)
+                except Exception:
+                    interval_hours = None
+
+        if (predicted_rate is None) or (next_dt is None) or (interval_hours is None):
+            try:
+                hist = await self._ccxt.publicGetV5MarketFundingHistory(
+                    {"category": category, "symbol": symbol, "limit": 1}
+                )
+                hlist = (hist or {}).get("result", {}).get("list", []) or []
+                last = hlist[0] if hlist else None
+            except Exception:
+                last = None
+
+            interval_minutes: int | None = None
+            if interval_hours is None:
+                try:
+                    ins = await self._ccxt.publicGetV5MarketInstrumentsInfo({"category": category, "symbol": symbol})
+                    ilist = (ins or {}).get("result", {}).get("list", []) or []
+                    info = ilist[0] if ilist else None
+                    if info:
+                        raw_interval_min = info.get("fundingInterval")
+                        if raw_interval_min not in (None, ""):
+                            interval_minutes = int(raw_interval_min)
+                except Exception:
+                    interval_minutes = None
+
+                if (interval_minutes is None) and (interval_hours is not None):
+                    interval_minutes = interval_hours * 60
+            else:
+                interval_minutes = interval_hours * 60
+
+            if (predicted_rate is None) and last:
+                lr = last.get("fundingRate")
+                if lr not in (None, ""):
+                    try:
+                        predicted_rate = float(lr)
+                    except Exception:
+                        predicted_rate = None
+
+            if (next_dt is None) and last and interval_minutes:
+                ts_ms = last.get("fundingRateTimestamp")
+                try:
+                    settled_dt = parse_exchange_ts(ts_ms)
+                    next_dt = settled_dt + timedelta(minutes=interval_minutes)
+                except Exception:
+                    next_dt = None
+
+        if (predicted_rate is None) or (next_dt is None):
+            raise DataError(f"Bybit funding info missing: symbol={symbol}, rate={predicted_rate}, next={next_dt}")
+
+        return FundingInfo(
+            symbol=symbol,
+            current_rate=None,
+            predicted_rate=predicted_rate,
+            next_funding_time=next_dt,
+            funding_interval_hours=interval_hours,
+        )
+
+    async def cancel_order(self, symbol: str, order_id: str | None = None, client_order_id: str | None = None) -> None:
+        """Bybit v5 の注文取消。
+        - orderId があればそれを使う
+        - なければ client_order_id（= orderLinkId）で確実に取り消す
+        """
+
+        category = "linear" if symbol.endswith(("USDT", "USDC")) else "inverse"
+        try:
+            params: dict[str, Any] = {"category": category, "symbol": symbol}
+            if order_id:
+                params["orderId"] = order_id
+            elif client_order_id:
+                params["orderLinkId"] = client_order_id
+            else:
+                raise DataError(f"cancel_order requires order_id or client_order_id: symbol={symbol}")
+
+            await self._ccxt.privatePostV5OrderCancel(params)
+        except ccxt.RateLimitExceeded as e:
+            raise RateLimitError(str(e)) from e
+        except Exception as e:  # noqa: BLE001
+            raise ExchangeError(f"cancel_order failed: {e}") from e

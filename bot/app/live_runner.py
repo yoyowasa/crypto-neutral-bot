@@ -56,6 +56,8 @@ async def _handle_private_order(msg: dict, oms: OmsEngine) -> None:
             "cum_filled_qty": float(row.get("cumExecQty") or 0),
             "avg_fill_price": float(row.get("avgPrice")) if row.get("avgPrice") is not None else None,
         }
+        client_order_id = row.get("orderLinkId") or row.get("clOrdId") or row.get("clientOrderId") or None
+        event["client_order_id"] = client_order_id
         await oms.on_execution_event(event)
 
 
@@ -72,6 +74,8 @@ async def _handle_private_execution(msg: dict, oms: OmsEngine) -> None:
             "cum_filled_qty": float(row.get("cumExecQty") or 0),
             "avg_fill_price": float(row.get("execPrice") or row.get("price") or 0),
         }
+        client_order_id = row.get("orderLinkId") or row.get("clOrdId") or row.get("clientOrderId") or None
+        event["client_order_id"] = client_order_id
         await oms.on_execution_event(event)
 
 
@@ -93,7 +97,11 @@ async def _cancel_all_open_orders(ex: ExchangeGateway) -> None:
     logger.info("startup: cancel {} open orders", len(opens))
     for o in opens:
         try:
-            await ex.cancel_order(order_id=o.order_id, client_id=o.client_id)
+            await ex.cancel_order(
+                symbol=o.symbol,
+                order_id=o.order_id,
+                client_order_id=getattr(o, "client_order_id", None) or o.client_id,
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("cancel failed: order_id={} err={}", o.order_id, e)
 

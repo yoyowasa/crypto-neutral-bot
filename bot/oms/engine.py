@@ -7,7 +7,10 @@ from typing import Any
 
 from loguru import logger
 
-from bot.core.errors import ExchangeError
+from bot.core.errors import (
+    ExchangeError,
+    RiskBreach,  # 二重発注を止めるための制御用エラー（リスク違反として扱う）
+)
 from bot.core.time import utc_now
 from bot.data.repo import Repo
 from bot.exchanges.base import ExchangeGateway
@@ -34,6 +37,7 @@ class OmsEngine:
         self._repo = repo
         self._cfg = cfg or OmsConfig()
         self._orders: dict[str, ManagedOrder] = {}  # key: client_id
+        self._inflight_client_ids: set[str] = set()  # 送信済みのclient注文IDを記録して二重発注を防ぐメモ帳
 
     # ---------- 内部: client_id 生成 ----------
 
@@ -52,6 +56,21 @@ class OmsEngine:
         """これは何をする関数？
         → 注文を取引所へ発注し、OMSの追跡に登録します（idempotencyのためclient_id必須）。
         """
+
+        # Bybit の client order id（orderLinkId）を未指定ならここで採番
+        try:
+            import uuid
+
+            if getattr(req, "client_order_id", None) in (None, ""):
+                req.client_order_id = f"bot-{uuid.uuid4().hex}"
+        except Exception:
+            pass
+
+        coid = req.client_order_id or self._gen_client_id("bot")
+        req.client_order_id = coid
+        if coid in self._inflight_client_ids:
+            raise RiskBreach(f"duplicate client_order_id (idempotent submit): {coid}")  # 同じIDでの二重発注をブロック
+        self._inflight_client_ids.add(coid)  # 今回送るIDをメモして二重送信を防止
 
         if not req.client_id:
             req.client_id = self._gen_client_id("ord")
@@ -96,8 +115,6 @@ class OmsEngine:
         → 指定注文を取消します（order_id または client_id を指定）。
         """
 
-        await self._ex.cancel_order(order_id=order_id, client_id=client_id)
-
         cid = client_id
         if not cid and order_id:
             for key, candidate in self._orders.items():
@@ -105,9 +122,15 @@ class OmsEngine:
                     cid = key
                     break
 
-        managed: ManagedOrder | None = None
-        if cid:
-            managed = self._orders.get(cid)
+        managed: ManagedOrder | None = self._orders.get(cid) if cid else None
+
+        if managed:
+            symbol = managed.req.symbol
+            client_oid = getattr(managed.req, "client_order_id", None)
+            ex_order_id = order_id or managed.order_id
+            await self._ex.cancel_order(symbol=symbol, order_id=ex_order_id, client_order_id=client_oid)
+        else:
+            raise ExchangeError("cancel requires known symbol (managed order not found)")
         if managed:
             managed.state = OrderLifecycleState.CANCELED
 
@@ -223,6 +246,13 @@ class OmsEngine:
                     managed.retries,
                 )
 
+        # idempotent submit cleanup: 終端ステータスでclient_order_idをメモ帳から削除
+        coid = event.get("client_order_id") if isinstance(event, dict) else getattr(event, "client_order_id", None)
+        st = ((event.get("status") if isinstance(event, dict) else getattr(event, "status", None)) or "").upper()
+        if st in ("FILLED", "CANCELED", "CANCELLED", "REJECTED"):
+            if coid:
+                self._inflight_client_ids.discard(coid)
+
     # ---------- タイムアウト監視 ----------
 
     async def process_timeouts(self) -> None:
@@ -254,7 +284,11 @@ class OmsEngine:
             )
 
             try:
-                await self._ex.cancel_order(order_id=managed.order_id, client_id=cid)
+                await self._ex.cancel_order(
+                    symbol=managed.req.symbol,
+                    order_id=managed.order_id,
+                    client_order_id=getattr(managed.req, "client_order_id", None),
+                )
             except ExchangeError as exc:
                 logger.warning("OMS timeout cancel failed: cid={} err={}", cid, exc)
 
