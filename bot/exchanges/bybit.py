@@ -174,8 +174,17 @@ class BybitGateway(ExchangeGateway):
                 oo = await self._rest.fetch_open_orders()
             out: list[Order] = []
             for o in oo or []:
+                # convert ccxt symbol to internal format like 'BTCUSDT'
+                internal_symbol = None
+                try:
+                    cs = o.get("symbol")
+                    if isinstance(cs, str):
+                        internal_symbol = cs.replace("/", "").replace(":USDT", "").replace(":USDC", "")
+                except Exception:
+                    internal_symbol = None
                 out.append(
                     Order(
+                        symbol=internal_symbol or "",
                         order_id=str(o.get("id") or o.get("orderId")),
                         client_id=o.get("clientOrderId"),
                         status=self._order_status_from_ccxt(o.get("status") or ""),
@@ -214,6 +223,7 @@ class BybitGateway(ExchangeGateway):
                 params=params,
             )
             return Order(
+                symbol=req.symbol,
                 order_id=str(created.get("id") or created.get("orderId")),
                 client_id=created.get("clientOrderId"),
                 client_order_id=created.get("clientOrderId"),

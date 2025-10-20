@@ -223,8 +223,8 @@ class ReplayDataSource(ExchangeGateway):
     async def place_order(self, req: OrderRequest) -> Order:  # pragma: no cover - 未使用
         raise NotImplementedError
 
-    async def cancel_order(
-        self, order_id: str | None = None, client_id: str | None = None
+    async def cancel_order(  # type: ignore[override]
+        self, symbol: str, order_id: str | None = None, client_order_id: str | None = None
     ):  # pragma: no cover - 未使用
         raise NotImplementedError
 

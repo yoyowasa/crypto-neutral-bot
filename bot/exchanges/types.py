@@ -33,6 +33,7 @@ class OrderRequest(BaseModel):
 
 
 class Order(BaseModel):
+    symbol: str
     order_id: str
     client_id: str | None
     client_order_id: str | None = None  # exchange client order id (Bybit: orderLinkId)

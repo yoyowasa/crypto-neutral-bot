@@ -88,6 +88,7 @@ class PaperExchange(ExchangeGateway):
                     continue
                 out.append(
                     Order(
+                        symbol=po.req.symbol,
                         order_id=po.order_id,
                         client_id=po.client_id,
                         status=po.status,
@@ -140,6 +141,7 @@ class PaperExchange(ExchangeGateway):
             price = await self._price_for_market(req.symbol, req.side)
             await self._fill_now(po, fill_qty=req.qty, price=price, final_status="filled")
             return Order(
+                symbol=req.symbol,
                 order_id=po.order_id,
                 client_id=po.client_id,
                 status="filled",
@@ -153,6 +155,7 @@ class PaperExchange(ExchangeGateway):
                 price = await self._price_for_limit_fill(req.symbol, req.side)
                 await self._fill_now(po, fill_qty=req.qty, price=price, final_status="filled")
                 return Order(
+                    symbol=req.symbol,
                     order_id=po.order_id,
                     client_id=po.client_id,
                     status="filled",
@@ -161,6 +164,7 @@ class PaperExchange(ExchangeGateway):
                 )
             # 未約定のまま残す
             return Order(
+                symbol=req.symbol,
                 order_id=po.order_id,
                 client_id=po.client_id,
                 status="new",
@@ -170,7 +174,14 @@ class PaperExchange(ExchangeGateway):
 
         # 未対応タイプはエラーにしない（MVPではnewにして残す）
         logger.warning("paper: unsupported order type={}, leave as new", req.type)
-        return Order(order_id=po.order_id, client_id=po.client_id, status="new", filled_qty=0.0, avg_fill_price=None)
+        return Order(
+            symbol=po.req.symbol,
+            order_id=po.order_id,
+            client_id=po.client_id,
+            status="new",
+            filled_qty=0.0,
+            avg_fill_price=None,
+        )
 
     async def cancel_order(self, symbol: str, order_id: str | None = None, client_order_id: str | None = None) -> None:
         """これは何をする関数？→ ローカル注文を取消し、OMSへ 'canceled' を通知します。"""
