@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import random
 import time
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -128,7 +128,11 @@ class OmsEngine:
             symbol = managed.req.symbol
             client_oid = getattr(managed.req, "client_order_id", None)
             ex_order_id = order_id or managed.order_id
-            await self._ex.cancel_order(symbol=symbol, order_id=ex_order_id, client_order_id=client_oid)
+            try:
+                await self._ex.cancel_order(symbol=symbol, order_id=ex_order_id, client_order_id=client_oid)
+            except TypeError:
+                # legacy signature fallback: cancel_order(order_id=?, client_id=?)
+                await cast(Any, self._ex).cancel_order(order_id=ex_order_id, client_id=client_oid)
         else:
             raise ExchangeError("cancel requires known symbol (managed order not found)")
         if managed:
@@ -284,12 +288,20 @@ class OmsEngine:
             )
 
             try:
-                await self._ex.cancel_order(
-                    symbol=managed.req.symbol,
-                    order_id=managed.order_id,
-                    client_order_id=getattr(managed.req, "client_order_id", None),
-                )
+                try:
+                    await self._ex.cancel_order(
+                        symbol=managed.req.symbol,
+                        order_id=managed.order_id,
+                        client_order_id=getattr(managed.req, "client_order_id", None),
+                    )
+                except TypeError:
+                    await cast(Any, self._ex).cancel_order(
+                        order_id=managed.order_id,
+                        client_id=getattr(managed.req, "client_order_id", None),
+                    )
             except ExchangeError as exc:
+                logger.warning("OMS timeout cancel failed: cid={} err={}", cid, exc)
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("OMS timeout cancel failed: cid={} err={}", cid, exc)
 
             managed.state = OrderLifecycleState.CANCELED

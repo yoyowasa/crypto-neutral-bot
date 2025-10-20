@@ -133,6 +133,9 @@ class BybitGateway(ExchangeGateway):
                 out.append(Balance(asset=asset, total=total, available=available))
             return out
         except Exception as e:  # noqa: BLE001
+            msg = str(e).lower()
+            if "api key" in msg or "authentication" in msg or "auth" in msg:
+                return []
             raise ExchangeError(f"get_balances failed: {e}") from e
 
     async def get_positions(self) -> list[Position]:
@@ -184,7 +187,7 @@ class BybitGateway(ExchangeGateway):
                     internal_symbol = None
                 out.append(
                     Order(
-                        symbol=internal_symbol or "",
+                        symbol=internal_symbol,
                         order_id=str(o.get("id") or o.get("orderId")),
                         client_id=o.get("clientOrderId"),
                         status=self._order_status_from_ccxt(o.get("status") or ""),
@@ -274,6 +277,30 @@ class BybitGateway(ExchangeGateway):
                 return float(mark)
             raise ExchangeError(f"ticker has no price fields: {t}")
         except Exception as e:  # noqa: BLE001
+            msg = str(e).lower()
+            if "api key" in msg or "authentication" in msg or "auth" in msg:
+                # Fallback to a public-only CCXT client for ticker
+                pub = ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "swap"}})
+                try:
+                    if self._auth.testnet:
+                        pub.set_sandbox_mode(True)
+                    t = await pub.fetch_ticker(ccxt_sym)
+                    last = t.get("last")
+                    if last is not None:
+                        return float(last)
+                    bid, ask = t.get("bid"), t.get("ask")
+                    if bid is not None and ask is not None:
+                        return (float(bid) + float(ask)) / 2.0
+                    mark = t.get("info", {}).get("markPrice")
+                    if mark is not None:
+                        return float(mark)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        await pub.close()
+                    except Exception:
+                        pass
             raise ExchangeError(f"get_ticker failed: {e}") from e
 
     async def get_funding_info_old(self, symbol: str) -> FundingInfo:

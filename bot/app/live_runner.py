@@ -97,13 +97,17 @@ async def _cancel_all_open_orders(ex: ExchangeGateway) -> None:
     logger.info("startup: cancel {} open orders", len(opens))
     for o in opens:
         try:
+            sym: str | None = getattr(o, "symbol", None)
+            if not sym:
+                logger.warning("skip cancel: open order symbol unknown id={}", getattr(o, "order_id", None))
+                continue
             await ex.cancel_order(
-                symbol=o.symbol,
+                symbol=sym,
                 order_id=o.order_id,
                 client_order_id=getattr(o, "client_order_id", None) or o.client_id,
             )
         except Exception as e:  # noqa: BLE001
-            logger.warning("cancel failed: order_id={} err={}", o.order_id, e)
+            logger.warning("cancel failed: order_id={} err={}", getattr(o, "order_id", None), e)
 
 
 @retryable(tries=999999, wait_initial=1.0, wait_max=30.0)
