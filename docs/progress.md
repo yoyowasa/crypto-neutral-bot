@@ -249,3 +249,60 @@
 新規追加：docs/progress.md（上のコードブロックをそのまま保存）。
 
 既存ファイルの変更はありません。
+### 7. STEP13–25 実装ログ（Bybit v5 安定化と安全化）
+
+- STEP13: Funding情報の最終確定（Bybit v5）
+  - 予測レートと次回時刻を Ticker 優先で取得し、欠落時は history / instruments-info で補完。
+  - 変更: `bot/exchanges/bybit.py: get_funding_info`
+  - 型: `bot/exchanges/types.py: FundingInfo` に `funding_interval_hours` を保持。
+
+- STEP14: client_order_id（orderLinkId）の往復配線
+  - OMS 未指定時に `bot-<uuid32hex>` を自動採番して発注へ通す。
+  - 変更: `bot/oms/engine.py: submit()`／`bot/exchanges/bybit.py: place_order()`（orderLinkId を必ず送る）
+  - 型: `bot/exchanges/types.py: OrderRequest / Order` に `client_order_id` を追加。
+
+- STEP15: Private WS イベントへ client_order_id を確実に載せる
+  - 変更: `bot/app/live_runner.py` の private order/execution コールバックで `client_order_id` を設定。
+
+- STEP16: client_order_id での取消（orderId 不明でも安全）
+  - 変更: `bot/exchanges/base.py: cancel_order`、`bot/exchanges/bybit.py: cancel_order`（orderId or orderLinkId）
+  - OMS 側: `bot/oms/engine.py` は `client_order_id` を優先で渡す／Paper はシグネチャ合わせ。
+
+- STEP17: 同一 client_order_id の二重発注ブロック
+  - 変更: `bot/oms/engine.py` に `_inflight_client_ids` を導入。`submit()` で重複チェック→登録、`on_execution_event()` で終端時に掃除。
+
+- STEP18: 再起動/再接続で open 注文を再構築（reconcile）
+  - 変更: `bot/exchanges/bybit.py: get_open_orders`（/v5/order/realtime）
+  - OMS: `reconcile_inflight_open_orders(symbols)` を追加し、Private WS 接続直後に一度呼ぶ（`bot/app/live_runner.py`）。
+
+- STEP19: REST に指数バックオフ再試行（@retryable）
+  - 変更: `bot/exchanges/bybit.py` の `place_order / cancel_order / get_funding_info / get_open_orders` に `@retryable()` を付与。
+
+- STEP20: シンボル正規化＆カテゴリ自動判定（spot/linear/inverse）
+  - 変更: `bot/exchanges/bybit.py: _resolve_category` を実装、instruments-info で正しく判定＆キャッシュ。既存の endswith 判定は置換。
+
+- STEP21: 価格/数量の正規化（tickSize/qtyStep/min-max）
+  - 追加: `bybit.py: _get_instrument_info / _quantize_step / _dec_to_str / _normalize_price_qty`
+  - `place_order` 送信直前に丸め・範囲保証・指数表記なし化を実施。
+
+- STEP22: WS ステータス正規化＋部分約定の進捗をイベントに載せる
+  - 変更: `bot/app/live_runner.py`（order/execution）で標準化ステータスと cumExecQty/avgPrice/execQty/execPrice を搭載。
+
+- STEP23: PostOnly / ReduceOnly / TIF をエンドツーエンド配線
+  - 型: `OrderRequest` の `time_in_force/post_only/reduce_only` を活用。
+  - 変更: `bybit.py: place_order` で `timeInForce="PostOnly"` 優先、先物系のみ `reduceOnly=True`。戦略のクローズ系注文は `reduce_only=True`。
+
+- STEP24: PostOnly 価格を「非クロス」に自動微調整（BBO 参照）
+  - 追加: `bybit.py: _ensure_post_only_price`（BUY→ask-1tick / SELL→bid+1tick、安全側で再丸め）
+  - `place_order` で PostOnly の Limit 時のみ適用。
+
+- STEP25: 公開 WS の BBO をゲートウェイでキャッシュ（低遅延化）
+  - 追加: `bybit.py: update_bbo / get_bbo` と `_bbo_cache`。`_ensure_post_only_price` は WS キャッシュ優先、無ければ REST 補完。
+  - `bot/app/live_runner.py` で orderbook トピックから BBO を `update_bbo()` に反映。
+
+— 総合効果 —
+
+- 安定性: @retryable、カテゴリ/丸めの正規化、WS/REST の両輪で落ちにくく復帰しやすい。
+- 安全性: reduce_only、二重発注ブロック、再接続時の open 再構築で事故を未然に防止。
+- 充実データ: Funding・BBO・部分約定進捗が正しく取得・伝搬され、戦略/レポートの精度が向上。
+- コスト最適化: PostOnly のメイカー維持と非クロス自動補正で手数料と失敗を削減。
