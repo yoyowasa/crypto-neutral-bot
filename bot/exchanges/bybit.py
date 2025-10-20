@@ -217,12 +217,19 @@ class BybitGateway(ExchangeGateway):
             params: dict[str, Any] = {}
 
             # CCXT 統一パラメータ
-            if req.time_in_force:
+            # PostOnly が優先（Bybit v5 は timeInForce="PostOnly" を使用）
+            if getattr(req, "post_only", False):
+                params["timeInForce"] = "PostOnly"
+            elif getattr(req, "time_in_force", None):
                 params["timeInForce"] = req.time_in_force
-            if req.reduce_only:
+
+            # reduceOnly は線形/逆数カテゴリのみ有効
+            try:
+                _cat = await self._resolve_category(req.symbol)
+            except Exception:
+                _cat = None
+            if _cat in ("linear", "inverse") and getattr(req, "reduce_only", False):
                 params["reduceOnly"] = True
-            if req.post_only:
-                params["postOnly"] = True
             coid = getattr(req, "client_order_id", None) or req.client_id
             if coid:
                 params["clientOrderId"] = coid

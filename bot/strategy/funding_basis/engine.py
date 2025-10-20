@@ -371,7 +371,7 @@ class FundingBasisStrategy:
                 type="market",
                 qty=abs(holding.spot_qty),
                 time_in_force="IOC",
-                reduce_only=False,
+                reduce_only=True,  # 全クローズでは必ずreduce-onlyにして新規建てを防ぐ
                 post_only=False,
             )
             await self._oms.submit(req)
