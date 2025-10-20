@@ -9,6 +9,7 @@ import time
 from contextlib import suppress  # これは何をするimport？→ close時の例外を握りつぶして穏当に終了する
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import ROUND_DOWN, Decimal  # 価格・数量を取引所ステップに正確丸めするために使う
 from hashlib import sha256
 from typing import Any, Awaitable, Callable
 
@@ -59,6 +60,12 @@ class BybitGateway(ExchangeGateway):
         # これは何をする初期化？→ ccxtの非同期クライアントを1つだけ生成し、全REST呼び出しで共有する
         # 既存の _rest インスタンスを _ccxt としても参照し、明示 close() の対象とする
         self._ccxt = self._rest
+        self._symbol_category_cache: dict[str, str] = (
+            {}
+        )  # instruments-infoで判定したカテゴリ(spot/linear/inverse)の簡易キャッシュ
+        self._instrument_info_cache: dict[str, dict] = (
+            {}
+        )  # instruments-infoのtickSize/qtyStep等をキャッシュしてREST前の丸めに使う
 
         # --- WS エンドポイント（Bybit v5 公式・要確認 & 必要に応じて linear/inverse/spot を選択） ---
         # Public:
@@ -219,12 +226,26 @@ class BybitGateway(ExchangeGateway):
             coid = getattr(req, "client_order_id", None) or req.client_id
             if coid:
                 params["clientOrderId"] = coid
-            price = req.price if req.type == "limit" else None
+            # Normalize price/qty by instruments-info to avoid invalid step errors
+            price_str, qty_str = await self._normalize_price_qty(
+                symbol=req.symbol,
+                side=req.side,
+                price=(req.price if req.type == "limit" else None),
+                qty=req.qty,
+                order_type=req.type,
+            )  # BybitのtickSize/qtyStepに合わせて安全に丸める
+            if qty_str is not None:
+                params["qty"] = qty_str  # 取引所許容ステップの数量（文字列）
+            if price_str is not None:
+                params["price"] = price_str  # 取引所許容ステップの価格（文字列：Limitのみ）
+            else:
+                params.pop("price", None)
+            price = float(price_str) if price_str is not None else None
             created = await self._rest.create_order(
                 symbol=ccxt_sym,
                 type=req.type,
                 side=req.side,
-                amount=req.qty,
+                amount=float(qty_str),
                 price=price,
                 params=params,
             )
@@ -498,7 +519,7 @@ class BybitGateway(ExchangeGateway):
         まずは Ticker（早い・軽い）で取り、足りなければ履歴+仕様でやさしく補完する。
         """
 
-        category = "linear" if symbol.endswith(("USDT", "USDC")) else "inverse"
+        category = await self._resolve_category(symbol)  # instruments-infoで正しいカテゴリを特定してからAPIを呼ぶ
         try:
             res = await self._ccxt.publicGetV5MarketTickers({"category": category, "symbol": symbol})
             items = (res or {}).get("result", {}).get("list", []) or []
@@ -592,7 +613,7 @@ class BybitGateway(ExchangeGateway):
         - なければ client_order_id（= orderLinkId）で確実に取り消す
         """
 
-        category = "linear" if symbol.endswith(("USDT", "USDC")) else "inverse"
+        category = await self._resolve_category(symbol)  # instruments-infoで正しいカテゴリを特定してからAPIを呼ぶ
         try:
             params: dict[str, Any] = {"category": category, "symbol": symbol}
             if order_id:
@@ -607,3 +628,114 @@ class BybitGateway(ExchangeGateway):
             raise RateLimitError(str(e)) from e
         except Exception as e:  # noqa: BLE001
             raise ExchangeError(f"cancel_order failed: {e}") from e
+
+    async def _resolve_category(self, symbol: str) -> str:
+        """Bybit v5 instruments-infoを用いて spot/linear/inverse を判定しキャッシュする。"""
+
+        cached = self._symbol_category_cache.get(symbol)
+        if cached:
+            return cached
+
+        # internal spot symbol may end with _SPOT; Bybit v5 APIs expect core symbol like 'BTCUSDT'
+        _api_symbol = symbol[:-5] if symbol.endswith("_SPOT") else symbol
+
+        for cat_try in ("linear", "inverse", "spot"):
+            try:
+                res = await self._ccxt.publicGetV5MarketInstrumentsInfo({"category": cat_try, "symbol": _api_symbol})
+                items = (res or {}).get("result", {}).get("list", []) or []
+                if items:
+                    self._symbol_category_cache[symbol] = cat_try
+                    return cat_try
+            except Exception:
+                continue
+
+        fallback = "linear" if _api_symbol.endswith(("USDT", "USDC")) else "inverse"
+        self._symbol_category_cache[symbol] = fallback
+        return fallback
+
+    @staticmethod
+    def _dec_to_str(d: Decimal) -> str:
+        """Decimalを指数表記なしの文字列にする（RESTに渡しやすくする）"""
+        return format(d.normalize(), "f")
+
+    @staticmethod
+    def _quantize_step(value: Decimal, step: Decimal) -> Decimal:
+        """valueをstepの倍数に下方向（安全側）で丸める。取引所ステップを超えないようにする。"""
+        if step <= 0:
+            return value
+        return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+    async def _get_instrument_info(self, symbol: str) -> dict:
+        """Bybit v5 instruments-infoから、この銘柄のtickSize/qtyStep/最小最大を取得しキャッシュして返す。"""
+
+        cached = self._instrument_info_cache.get(symbol)
+        if cached:
+            return cached
+
+        category = await self._resolve_category(symbol)
+        api_symbol = symbol[:-5] if symbol.endswith("_SPOT") else symbol
+        res = await self._ccxt.publicGetV5MarketInstrumentsInfo({"category": category, "symbol": api_symbol})
+        items = (res or {}).get("result", {}).get("list", []) or []
+        if not items:
+            raise DataError(f"instruments-info not found: symbol={symbol}")
+        info = items[0]
+        price_filter = info.get("priceFilter", {}) or {}
+        lot_filter = info.get("lotSizeFilter", {}) or {}
+        out = {
+            "tick_size": price_filter.get("tickSize"),
+            "min_price": price_filter.get("minPrice"),
+            "max_price": price_filter.get("maxPrice"),
+            "qty_step": lot_filter.get("qtyStep"),
+            "min_order_qty": lot_filter.get("minOrderQty"),
+            "max_order_qty": lot_filter.get("maxOrderQty"),
+        }
+        self._instrument_info_cache[symbol] = out
+        return out
+
+    async def _normalize_price_qty(
+        self,
+        symbol: str,
+        side: str,
+        price: object | None,
+        qty: object,
+        order_type: str,
+    ) -> tuple[str | None, str]:
+        """価格と数量をBybitのtickSize/qtyStepに合わせて丸め、範囲外は例外にする。
+        戻り値はRESTに渡す文字列（指数表記なし）。priceはLimit時のみ返る。
+        """
+
+        info = await self._get_instrument_info(symbol)
+
+        # 数量
+        dqty = Decimal(str(qty))
+        step = Decimal(str(info["qty_step"])) if info.get("qty_step") not in (None, "") else None
+        if step is not None:
+            dqty = self._quantize_step(dqty, step)
+        min_q = Decimal(str(info["min_order_qty"])) if info.get("min_order_qty") not in (None, "") else None
+        max_q = Decimal(str(info["max_order_qty"])) if info.get("max_order_qty") not in (None, "") else None
+        if min_q and dqty < min_q:
+            raise DataError(f"qty below minOrderQty: {dqty} < {min_q} ({symbol})")
+        if max_q and dqty > max_q:
+            dqty = self._quantize_step(max_q, step or Decimal("1"))
+        if dqty <= 0:
+            raise DataError(f"qty rounded to zero for {symbol}")
+        qty_str = self._dec_to_str(dqty)
+
+        # 価格（Limit時のみ）
+        price_str: str | None = None
+        if (order_type or "").lower().startswith("limit") and price is not None:
+            dpx = Decimal(str(price))
+            tick = Decimal(str(info["tick_size"])) if info.get("tick_size") not in (None, "") else None
+            if tick is not None:
+                dpx = self._quantize_step(dpx, tick)
+            min_p = Decimal(str(info["min_price"])) if info.get("min_price") not in (None, "") else None
+            max_p = Decimal(str(info["max_price"])) if info.get("max_price") not in (None, "") else None
+            if min_p and dpx < min_p:
+                dpx = min_p
+                if tick is not None:
+                    dpx = self._quantize_step(dpx, tick)
+            if max_p and dpx > max_p:
+                dpx = self._quantize_step(max_p, tick or Decimal("1"))
+            price_str = self._dec_to_str(dpx)
+
+        return price_str, qty_str

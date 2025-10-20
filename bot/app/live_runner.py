@@ -21,6 +21,18 @@ from bot.oms.fill_sim import PaperExchange
 from bot.risk.guards import RiskManager
 from bot.strategy.funding_basis.engine import FundingBasisStrategy
 
+# Bybit v5 -> OMS ステータス正規化対応表
+STATUS_MAP_BYBIT_TO_OMS = {
+    "Created": "NEW",
+    "New": "NEW",
+    "PartiallyFilled": "PARTIAL",
+    "Filled": "FILLED",
+    "Cancelled": "CANCELED",  # Bybit側は"Cancelled"表記
+    "Canceled": "CANCELED",  # 念のため表記ゆれも同値扱い
+    "Rejected": "REJECTED",
+    "Untriggered": "NEW",  # 条件注文が未発火のときはNEW相当として扱う
+}
+
 # ===== Bybit Privateメッセージ → OMSイベント の最小変換（MVP） =====
 
 
@@ -56,6 +68,18 @@ async def _handle_private_order(msg: dict, oms: OmsEngine) -> None:
             "cum_filled_qty": float(row.get("cumExecQty") or 0),
             "avg_fill_price": float(row.get("avgPrice")) if row.get("avgPrice") is not None else None,
         }
+        # --- ステータス正規化（Bybit -> OMS） ---
+        status_raw = row.get("orderStatus") or row.get("order_status")
+        event["status"] = STATUS_MAP_BYBIT_TO_OMS.get(status_raw, status_raw or "NEW")
+        # --- 識別子の受け渡し ---
+        event["order_id"] = row.get("orderId")
+        # --- 進捗情報（部分約定の累積） ---
+        event["filled_qty"] = row.get("cumExecQty") or row.get("cumFilledQty")
+        event["avg_price"] = row.get("avgPrice")
+        # --- 約定（1回ごとの出来）情報を付与 ---
+        event["order_id"] = row.get("orderId")
+        event["last_fill_qty"] = row.get("execQty")
+        event["last_fill_price"] = row.get("execPrice")
         client_order_id = row.get("orderLinkId") or row.get("clOrdId") or row.get("clientOrderId") or None
         event["client_order_id"] = client_order_id
         await oms.on_execution_event(event)
