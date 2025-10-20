@@ -247,7 +247,14 @@ class BybitGateway(ExchangeGateway):
                 params["price"] = price_str  # 取引所許容ステップの価格（文字列：Limitのみ）
             else:
                 params.pop("price", None)
-            price = float(price_str) if price_str is not None else None
+            # PostOnly: BBO基準で非クロスに最終調整
+            is_post_only = (params.get("timeInForce") == "PostOnly") or bool(getattr(req, "post_only", None))
+            if is_post_only and (req.type or "").lower().startswith("limit") and ("price" in params):
+                try:
+                    params["price"] = await self._ensure_post_only_price(req.symbol, req.side, params["price"])
+                except Exception:
+                    pass
+            price = float(params["price"]) if ("price" in params and params["price"] is not None) else None
             created = await self._rest.create_order(
                 symbol=ccxt_sym,
                 type=req.type,
@@ -746,3 +753,67 @@ class BybitGateway(ExchangeGateway):
             price_str = self._dec_to_str(dpx)
 
         return price_str, qty_str
+
+    async def _ensure_post_only_price(self, symbol: str, side: str, price_str: str) -> str:
+        """PostOnly時に価格を非クロスへ微調整する。
+        - BUY: best_ask - 1tick 以下へ
+        - SELL: best_bid + 1tick 以上へ
+        その後、tick に合わせて（安全側へ）丸め直して返す。
+        取得失敗などの場合は入力価格をそのまま返す。
+        """
+
+        try:
+            category = await self._resolve_category(symbol)
+        except Exception:
+            category = None
+
+        # API用のsymbol（_SPOT除去）
+        api_symbol = symbol[:-5] if symbol.endswith("_SPOT") else symbol
+
+        best_bid = None
+        best_ask = None
+        if category:
+            try:
+                res = await self._ccxt.publicGetV5MarketTickers({"category": category, "symbol": api_symbol})
+                item = ((res or {}).get("result", {}) or {}).get("list", [])
+                row = item[0] if item else {}
+                best_bid = row.get("bid1Price")
+                best_ask = row.get("ask1Price")
+            except Exception:
+                best_bid = None
+                best_ask = None
+
+        if not best_bid and not best_ask:
+            return price_str
+
+        try:
+            info = await self._get_instrument_info(symbol)
+            tick = info.get("tick_size")
+        except Exception:
+            tick = None
+        if not tick:
+            return price_str
+
+        tick_d = Decimal(str(tick))
+        px = Decimal(str(price_str))
+        side_u = (side or "").upper()
+
+        if side_u == "BUY" and best_ask:
+            try:
+                ask = Decimal(str(best_ask))
+                target = ask - tick_d
+                if px > target:
+                    px = target
+            except Exception:
+                pass
+        elif side_u == "SELL" and best_bid:
+            try:
+                bid = Decimal(str(best_bid))
+                target = bid + tick_d
+                if px < target:
+                    px = target
+            except Exception:
+                pass
+
+        px = self._quantize_step(px, tick_d)
+        return self._dec_to_str(px)
