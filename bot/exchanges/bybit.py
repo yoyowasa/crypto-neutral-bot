@@ -34,6 +34,33 @@ class _Auth:
     testnet: bool
 
 
+class _RestWrapper:
+    """Callable + closable RESTラッパ
+    - セマフォで同時実行を制御するために __call__ を提供
+    - 互換性のために close() を実装して ccxt 側へ委譲
+    - 未定義の属性は ccxt インスタンスへフォワード
+    """
+
+    def __init__(self, semaphore: asyncio.Semaphore, ccxt_exchange: Any) -> None:
+        self._sem = semaphore
+        self._ccxt = ccxt_exchange
+
+    async def __call__(self, func, params: dict) -> dict:
+        async with self._sem:
+            return await func(params)
+
+    async def close(self) -> None:
+        close = getattr(self._ccxt, "close", None)
+        if callable(close):
+            try:
+                await close()
+            except TypeError:
+                close()
+
+    def __getattr__(self, name: str):  # fallback: expose ccxt attributes if accessed
+        return getattr(self._ccxt, name)
+
+
 class BybitGateway(ExchangeGateway):
     """Bybit v5 の REST/WS をまとめたゲートウェイ実装（MVP）"""
 
@@ -76,6 +103,8 @@ class BybitGateway(ExchangeGateway):
 
         self._rest_max_concurrency: int = 4  # RESTの同時実行上限。環境に応じて調整可能（429予防）
         self._rest_semaphore = asyncio.Semaphore(self._rest_max_concurrency)  # 上限を守るセマフォ
+        # _rest を callable + closable なラッパにして互換性を保つ
+        self._rest = _RestWrapper(self._rest_semaphore, self._ccxt)
 
         # --- WS エンドポイント（Bybit v5 公式・要確認 & 必要に応じて linear/inverse/spot を選択） ---
         # Public:
@@ -134,16 +163,6 @@ class BybitGateway(ExchangeGateway):
             "expired": "canceled",
         }
         return mapping.get(s, s)
-
-    # ---------- REST 共通ラッパ + CCXT 経由呼び出し ----------
-
-    async def _rest(self, func, params: dict) -> dict:
-        """REST呼び出しを必ずここから通す共通関数。
-        - セマフォで同時実行を制御し、混雑時のエラー連鎖を予防する。
-        - func は ccxt のバウンドメソッド（例: self._ccxt.publicGetV5MarketTickers）
-        """
-        async with self._rest_semaphore:  # 同時実行の上限を超えないようにする
-            return await func(params)
 
     # ---------- REST 実装（CCXT） ----------
 
