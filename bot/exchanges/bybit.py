@@ -16,6 +16,7 @@ import ccxt.async_support as ccxt  # CCXT の async 版を使う（REST はこ�
 import websockets
 
 from bot.core.errors import DataError, ExchangeError, RateLimitError, WsDisconnected
+from bot.core.retry import retryable  # REST呼び出しに指数バックオフ再試行を付与するデコレータ
 from bot.core.time import parse_exchange_ts
 
 from .base import ExchangeGateway
@@ -166,6 +167,7 @@ class BybitGateway(ExchangeGateway):
         except Exception as e:  # noqa: BLE001
             raise ExchangeError(f"get_positions failed: {e}") from e
 
+    @retryable()  # 再接続直後のopen注文取り直しで一過性の失敗にも強くする
     async def get_open_orders(self, symbol: str | None = None) -> list[Order]:
         """これは何をする関数？→ 指定（または全て）の未約定注文を返す"""
 
@@ -199,6 +201,7 @@ class BybitGateway(ExchangeGateway):
         except Exception as e:  # noqa: BLE001
             raise ExchangeError(f"get_open_orders failed: {e}") from e
 
+    @retryable()  # 発注の一過性失敗（429/接続断など）に対して自動で指数バックオフ再試行する
     async def place_order(self, req: OrderRequest) -> Order:
         """これは何をする関数？→ 注文を発注し、作成された注文情報を返す"""
 
@@ -489,6 +492,7 @@ class BybitGateway(ExchangeGateway):
                 with suppress(Exception):
                     await ws.close()
 
+    @retryable()  # Funding取得時の一過性エラーに備える（数回だけ指数バックオフ再試行）
     async def get_funding_info(self, symbol: str) -> FundingInfo:
         """Bybit v5 から資金調達レートと次回時刻を取ってくる関数。
         まずは Ticker（早い・軽い）で取り、足りなければ履歴+仕様でやさしく補完する。
@@ -581,6 +585,7 @@ class BybitGateway(ExchangeGateway):
             funding_interval_hours=interval_hours,
         )
 
+    @retryable()  # 取消の一過性失敗に対して自動再試行（安全に諦めず数回だけ挑戦）
     async def cancel_order(self, symbol: str, order_id: str | None = None, client_order_id: str | None = None) -> None:
         """Bybit v5 の注文取消。
         - orderId があればそれを使う
