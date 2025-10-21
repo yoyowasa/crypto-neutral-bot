@@ -41,6 +41,9 @@ class OmsEngine:
         self._repo = repo
         self._cfg = cfg or OmsConfig()
         self._orders: dict[str, ManagedOrder] = {}  # key: client_id
+        # WS ライブネスのメモとブロックしきい値（デフォルト値は安全側）
+        self._ws_private_last_ms: int = 0
+        self._ws_stale_block_ms: int = 10_000
         self._last_event_ms: dict[str, int] = (
             {}
         )  # 注文ごとの最終更新時刻（ms）を覚えて、古いWSイベントを無視するためのメモ

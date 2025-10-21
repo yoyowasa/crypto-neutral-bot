@@ -264,16 +264,34 @@ async def _main_async(env: str, cfg_path: str | None, dry_run: bool, flatten_on_
 
     # 実データ源（REST/WS）。dry-run でもデータ源として使用
     data_ex = BybitGateway(api_key=cfg.keys.api_key, api_secret=cfg.keys.api_secret, environment=exchange_env)
+    # --- 設定の適用：BybitGateway（REST/BBO/価格ガード） ---
+    data_ex._bbo_max_age_ms = cfg.exchange.bbo_max_age_ms  # BBO鮮度ガード（STEP28）
+    data_ex._rest_max_concurrency = cfg.exchange.rest_max_concurrency  # REST同時実行上限（STEP29）
+    data_ex._rest_semaphore = asyncio.Semaphore(data_ex._rest_max_concurrency)  # 新しい上限でセマフォを再構築
+    data_ex._rest_cb_fail_threshold = cfg.exchange.rest_cb_fail_threshold  # サーキット連続失敗回数（STEP31）
+    data_ex._rest_cb_open_seconds = cfg.exchange.rest_cb_open_seconds  # サーキット休止秒（STEP31）
+    data_ex._price_dev_bps_limit = cfg.risk.price_dev_bps_limit  # 価格逸脱ガード[bps]（STEP34）
 
     # 発注先（dry-run は PaperExchange、live は BybitGateway）
     if dry_run:
         trade_ex: ExchangeGateway = PaperExchange(data_source=data_ex, initial_usdt=100_000.0)
         oms = OmsEngine(ex=trade_ex, repo=repo, cfg=None)
+        # --- 設定の適用：OMS（WS古さブロック、STEP32） ---
+        oms._ws_stale_block_ms = cfg.risk.ws_stale_block_ms
         assert isinstance(trade_ex, PaperExchange)
         trade_ex.bind_oms(oms)
     else:
         trade_ex = BybitGateway(api_key=cfg.keys.api_key, api_secret=cfg.keys.api_secret, environment=exchange_env)
+        # --- 設定の適用：BybitGateway（REST/BBO/価格ガード） ---
+        trade_ex._bbo_max_age_ms = cfg.exchange.bbo_max_age_ms  # BBO鮮度ガード（STEP28）
+        trade_ex._rest_max_concurrency = cfg.exchange.rest_max_concurrency  # REST同時実行上限（STEP29）
+        trade_ex._rest_semaphore = asyncio.Semaphore(trade_ex._rest_max_concurrency)  # 新しい上限でセマフォを再構築
+        trade_ex._rest_cb_fail_threshold = cfg.exchange.rest_cb_fail_threshold  # サーキット連続失敗回数（STEP31）
+        trade_ex._rest_cb_open_seconds = cfg.exchange.rest_cb_open_seconds  # サーキット休止秒（STEP31）
+        trade_ex._price_dev_bps_limit = cfg.risk.price_dev_bps_limit  # 価格逸脱ガード[bps]（STEP34）
         oms = OmsEngine(ex=trade_ex, repo=repo, cfg=None)
+        # --- 設定の適用：OMS（WS古さブロック、STEP32） ---
+        oms._ws_stale_block_ms = cfg.risk.ws_stale_block_ms
 
     # RiskManager（flatten_all の実体は strategy 経由にする）
     strategy_holder: dict[str, Any] = {}

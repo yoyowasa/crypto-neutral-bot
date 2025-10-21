@@ -23,6 +23,10 @@ class ExchangeConfig(BaseModel):
     recv_window_ms: int = 5000
     ws_public_url: str | None = None
     ws_private_url: str | None = None
+    bbo_max_age_ms: int = 3000  # BBO鮮度ガード（ミリ秒）。古い板はRESTで補う（STEP28）
+    rest_max_concurrency: int = 4  # REST同時実行の上限（セマフォ、STEP29）
+    rest_cb_fail_threshold: int = 5  # RESTサーキットブレーカの連続失敗回数（STEP31）
+    rest_cb_open_seconds: int = 3  # RESTサーキットのクールダウン秒（STEP31）
 
 
 class RiskConfig(BaseModel):
@@ -33,6 +37,9 @@ class RiskConfig(BaseModel):
     max_net_delta: float
     max_slippage_bps: float
     loss_cut_daily_jpy: float
+    price_dev_bps_limit: int | None = 50  # BBO中値からの最大乖離[bps]。Noneで無効（STEP34）
+    ws_stale_block_ms: int = 10_000  # Private WSが古いとき新規発注を止める閾値（ミリ秒、STEP32）
+    # （将来用）prefer_post_only: bool = False  # OPEN系をメイカー優先にしたい場合のフラグ
 
 
 class StrategyFundingConfig(BaseModel):
