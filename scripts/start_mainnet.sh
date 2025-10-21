@@ -14,6 +14,11 @@ export EXCHANGE__ALLOW_LIVE=${EXCHANGE__ALLOW_LIVE:-true}
 
 # Use mainnet config example by default if no APP_CONFIG_FILE provided
 export APP_CONFIG_FILE=${APP_CONFIG_FILE:-config/app.mainnet.yaml}
+# Fallback to example if the specified config file does not exist
+if [[ ! -f "$APP_CONFIG_FILE" ]]; then
+  APP_CONFIG_FILE="config/app.mainnet.example.yaml"
+  export APP_CONFIG_FILE
+fi
 
 echo "[start_mainnet] APP_CONFIG_FILE=$APP_CONFIG_FILE"
 echo "[start_mainnet] EXCHANGE__ALLOW_LIVE=$EXCHANGE__ALLOW_LIVE"
@@ -22,4 +27,3 @@ echo "[start_mainnet] EXCHANGE__ALLOW_LIVE=$EXCHANGE__ALLOW_LIVE"
 mkdir -p logs
 
 exec python -m bot.app.live_runner --env mainnet "$@"
-

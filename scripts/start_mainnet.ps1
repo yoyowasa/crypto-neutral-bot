@@ -23,6 +23,8 @@ if (-not $env:EXCHANGE__ALLOW_LIVE) { $env:EXCHANGE__ALLOW_LIVE = 'true' }
 
 # Default config file if not provided
 if (-not $env:APP_CONFIG_FILE) { $env:APP_CONFIG_FILE = 'config/app.mainnet.yaml' }
+# Fallback to example if file does not exist
+if (-not (Test-Path $env:APP_CONFIG_FILE)) { $env:APP_CONFIG_FILE = 'config/app.mainnet.example.yaml' }
 
 Write-Host "[start_mainnet] APP_CONFIG_FILE=$env:APP_CONFIG_FILE"
 Write-Host "[start_mainnet] EXCHANGE__ALLOW_LIVE=$env:EXCHANGE__ALLOW_LIVE"

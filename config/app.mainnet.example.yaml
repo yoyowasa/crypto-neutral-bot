@@ -16,6 +16,13 @@ exchange:
   instrument_info_ttl_s: 600     # refresh instruments-info every 10 minutes
 
 risk:
+  # Required risk limits (examples, adjust for production)
+  max_total_notional: 10000.0      # 総建玉の最大想定名目（例）
+  max_symbol_notional: 5000.0      # 銘柄ごとの最大名目（例）
+  max_net_delta: 0.5               # ネットデルタの許容（例）
+  max_slippage_bps: 25.0           # 成行/IOC の許容スリッページ（bps, 例）
+  loss_cut_daily_jpy: 0.0          # 日次ロスカットしきい値（JPY相当, 例では無効）
+
   # Price deviation guard (tune per liquidity profile)
   price_dev_bps_limit: 75        # allow up to 75 bps drift from mid (raise if too tight)
 
@@ -46,4 +53,3 @@ strategy:
 
 db_url: "sqlite+aiosqlite:///./db/trading.db"
 timezone: "UTC"
-
