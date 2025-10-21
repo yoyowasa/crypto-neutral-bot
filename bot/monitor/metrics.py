@@ -28,7 +28,15 @@ class _Holdings:
 class MetricsLogger:
     """メトリクス心拍ロガー（一定間隔でログへ出力）"""
 
-    def __init__(self, *, ex: ExchangeGateway, repo: Repo, symbols: list[str], risk: object | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ex: ExchangeGateway,
+        repo: Repo,
+        symbols: list[str],
+        risk: object | None = None,
+        oms: object | None = None,
+    ) -> None:
         """これは何をする関数？
         → 参照先の ExchangeGateway/Repo/対象銘柄（symbols）を受け取り、心拍ログの準備をします。
         """
@@ -37,6 +45,7 @@ class MetricsLogger:
         self._repo = repo
         self._symbols = symbols
         self._risk = risk
+        self._oms = oms  # OmsEngine（任意）: ガード系メトリクスの集計元
 
     # ===== パブリックAPI =====
 
@@ -97,6 +106,23 @@ class MetricsLogger:
                 round(net, 2),
                 kill,
             )
+
+            # 追加メトリクス（ガード系）：OMS から集計を取得
+            try:
+                if self._oms is not None and hasattr(self._oms, "get_and_reset_guard_metrics"):
+                    snap = self._oms.get_and_reset_guard_metrics([sym])
+                    m = snap.get(sym, {}) if isinstance(snap, dict) else {}
+                    logger.info(
+                        "metrics extras: sym={} chase_p={} cooldown_p={} chase_t={} cooldown_t={}",
+                        sym,
+                        int(m.get("chase_period", 0)),
+                        int(m.get("cooldown_period", 0)),
+                        int(m.get("chase_total", 0)),
+                        int(m.get("cooldown_total", 0)),
+                    )
+            except Exception:
+                # メトリクスの取得失敗は致命ではない
+                pass
 
     # ===== 内部ユーティリティ =====
 

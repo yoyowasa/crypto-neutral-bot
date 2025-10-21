@@ -125,7 +125,7 @@ async def _run(config_path: str | None) -> None:
     strat_task = asyncio.create_task(_strategy_loop())
 
     # メトリクス心拍（30秒おき）と、日次レポート（UTC 00:05）
-    metrics = MetricsLogger(ex=paper_ex, repo=repo, symbols=cfg.strategy.symbols, risk=rm)
+    metrics = MetricsLogger(ex=paper_ex, repo=repo, symbols=cfg.strategy.symbols, risk=rm, oms=oms)
     metrics_task = asyncio.create_task(metrics.run_forever(interval_sec=30.0))
     reporter = ReportScheduler(repo=repo, out_dir="reports", hour_utc=0, minute_utc=5)
     report_task = asyncio.create_task(reporter.run_forever())

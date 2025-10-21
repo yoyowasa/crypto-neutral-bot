@@ -9,6 +9,7 @@ from typing import Any
 from loguru import logger
 
 from bot.config.loader import load_config
+from bot.core.errors import ConfigError  # 本番禁止のときは起動を止めるために使う
 from bot.core.logging import setup_logging
 from bot.core.retry import retryable
 from bot.data.repo import Repo
@@ -255,6 +256,16 @@ async def _main_async(env: str, cfg_path: str | None, dry_run: bool, flatten_on_
     setup_logging(level="INFO")
     cfg = load_config(cfg_path)
 
+    # 本番(mainnet)でallow_live=Falseなら、ここで止める（誤起動防止の安全弁）
+    is_mainnet = (str(env or "").lower() == "mainnet") or (
+        str(getattr(cfg.exchange, "environment", "")).lower() == "mainnet"
+    )
+    if is_mainnet and not bool(getattr(cfg.exchange, "allow_live", False)):
+        raise ConfigError(
+            "Live trading is disabled by config. Set exchange.allow_live=true in"
+            " config/app.yaml (or EXCHANGE__ALLOW_LIVE=true) to enable mainnet."
+        )
+
     # CLIの --env を優先
     exchange_env = env or cfg.exchange.environment
 
@@ -376,7 +387,7 @@ async def _main_async(env: str, cfg_path: str | None, dry_run: bool, flatten_on_
     tasks.append(asyncio.create_task(_loop()))
 
     # メトリクス心拍（30秒おき）
-    metrics = MetricsLogger(ex=trade_ex, repo=repo, symbols=cfg.strategy.symbols, risk=rm)
+    metrics = MetricsLogger(ex=trade_ex, repo=repo, symbols=cfg.strategy.symbols, risk=rm, oms=oms)
     tasks.append(asyncio.create_task(metrics.run_forever(interval_sec=30.0)))
 
     # 日次レポート（UTC 00:05 に前日分を作成）

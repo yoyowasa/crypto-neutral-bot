@@ -56,6 +56,11 @@ class OmsEngine:
         # PostOnly追従（アメンド）の頻度制御メモ
         self._last_amend_ms: dict[str, int] = {}
         self._amend_count_minute: dict[str, tuple[int, int]] = {}
+        # ===== メトリクス（集計用） =====
+        self._metrics_chase_amend_total: dict[str, int] = {}
+        self._metrics_cooldown_enter_total: dict[str, int] = {}
+        self._metrics_chase_amend_period: dict[str, int] = {}
+        self._metrics_cooldown_enter_period: dict[str, int] = {}
         self._last_event_ms: dict[str, int] = (
             {}
         )  # 注文ごとの最終更新時刻（ms）を覚えて、古いWSイベントを無視するためのメモ
@@ -429,6 +434,9 @@ class OmsEngine:
                 self._symbol_cooldown_ms,
             )  # REJECT連発→クールダウン突入
             self._symbol_cooldown_until[symbol] = now_ms + self._symbol_cooldown_ms
+            # メトリクス更新
+            self._metrics_cooldown_enter_total[symbol] = self._metrics_cooldown_enter_total.get(symbol, 0) + 1
+            self._metrics_cooldown_enter_period[symbol] = self._metrics_cooldown_enter_period.get(symbol, 0) + 1
             # 次の連発を独立に数える
             self._reject_window[symbol] = (now_ms, 0)
 
@@ -539,8 +547,36 @@ class OmsEngine:
                         self._amend_count_minute[eid] = (minute, rec[1] + 1)
                     else:
                         self._amend_count_minute[eid] = (minute, 1)
+                    # メトリクス更新
+                    self._metrics_chase_amend_total[sym] = self._metrics_chase_amend_total.get(sym, 0) + 1
+                    self._metrics_chase_amend_period[sym] = self._metrics_chase_amend_period.get(sym, 0) + 1
                 except Exception:
                     continue
+
+    # ===== メトリクス提供（MetricsLogger から呼び出し） =====
+    def get_and_reset_guard_metrics(self, symbols: list[str]) -> dict[str, dict[str, int]]:
+        """追従（チェイサ）・クールダウンの集計を取り出す（期間分はリセット）。
+        返却: {sym: {"chase_period": n, "cooldown_period": m, "chase_total": x, "cooldown_total": y}}
+        """
+
+        out: dict[str, dict[str, int]] = {}
+        for sym in symbols:
+            chase_p = int(self._metrics_chase_amend_period.get(sym, 0))
+            cool_p = int(self._metrics_cooldown_enter_period.get(sym, 0))
+            chase_t = int(self._metrics_chase_amend_total.get(sym, 0))
+            cool_t = int(self._metrics_cooldown_enter_total.get(sym, 0))
+            out[sym] = {
+                "chase_period": chase_p,
+                "cooldown_period": cool_p,
+                "chase_total": chase_t,
+                "cooldown_total": cool_t,
+            }
+            # 期間カウンタはリセット
+            if chase_p:
+                self._metrics_chase_amend_period[sym] = 0
+            if cool_p:
+                self._metrics_cooldown_enter_period[sym] = 0
+        return out
 
     # ---------- タイムアウト監視 ----------
 

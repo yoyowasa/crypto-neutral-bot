@@ -28,6 +28,7 @@ class ExchangeConfig(BaseModel):
     rest_cb_fail_threshold: int = 5  # RESTサーキットブレーカの連続失敗回数（STEP31）
     rest_cb_open_seconds: int = 3  # RESTサーキットのクールダウン秒（STEP31）
     instrument_info_ttl_s: int = 300  # instruments-infoのキャッシュ有効期限（秒）。過ぎたら自動で再取得（STEP39）
+    allow_live: bool = False  # 本番取引を許可する明示スイッチ。既定はFalse（安全側）
 
 
 class RiskConfig(BaseModel):

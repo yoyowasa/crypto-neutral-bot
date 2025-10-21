@@ -1,0 +1,49 @@
+keys:
+  # Set via environment variables or inject at runtime; do not commit real keys
+  api_key: "${KEYS__API_KEY:-}"
+  api_secret: "${KEYS__API_SECRET:-}"
+
+exchange:
+  name: bybit
+  environment: mainnet
+  allow_live: true  # Explicitly enable live trading for mainnet
+
+  # Safety and stability (production‑leaning)
+  bbo_max_age_ms: 1500           # fresher BBO to guide PostOnly (lower than default)
+  rest_max_concurrency: 2        # lower concurrency to avoid 429 bursts under load
+  rest_cb_fail_threshold: 3      # faster trip on repeated failures
+  rest_cb_open_seconds: 5        # slightly longer cool‑down under pressure
+  instrument_info_ttl_s: 600     # refresh instruments-info every 10 minutes
+
+risk:
+  # Price deviation guard (tune per liquidity profile)
+  price_dev_bps_limit: 75        # allow up to 75 bps drift from mid (raise if too tight)
+
+  # Private WS liveliness gate
+  ws_stale_block_ms: 15000       # block new submits if private WS is stale > 15s
+
+  # Reject burst → symbol cooldown
+  reject_burst_threshold: 3
+  reject_burst_window_s: 30
+  symbol_cooldown_s: 120
+
+strategy:
+  # Symbols to operate (example)
+  symbols: ["BTCUSDT", "ETHUSDT"]
+
+  # Maker chaser (PostOnly amend)
+  chase_enabled: true
+  chase_min_reprice_bps: 2
+  chase_min_reprice_ticks: 1
+  chase_interval_ms: 1500
+  chase_max_amends_per_min: 12
+
+  # Funding/basis defaults
+  min_expected_apr: 0.05
+  pre_event_open_minutes: 60
+  hold_across_events: true
+  rebalance_band_bps: 5.0
+
+db_url: "sqlite+aiosqlite:///./db/trading.db"
+timezone: "UTC"
+
