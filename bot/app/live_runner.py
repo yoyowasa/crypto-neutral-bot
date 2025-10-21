@@ -270,6 +270,7 @@ async def _main_async(env: str, cfg_path: str | None, dry_run: bool, flatten_on_
     data_ex._rest_semaphore = asyncio.Semaphore(data_ex._rest_max_concurrency)  # 新しい上限でセマフォを再構築
     data_ex._rest_cb_fail_threshold = cfg.exchange.rest_cb_fail_threshold  # サーキット連続失敗回数（STEP31）
     data_ex._rest_cb_open_seconds = cfg.exchange.rest_cb_open_seconds  # サーキット休止秒（STEP31）
+    data_ex._instrument_info_ttl_s = cfg.exchange.instrument_info_ttl_s  # instruments-infoの自動リフレッシュ間隔（秒）
     data_ex._price_dev_bps_limit = cfg.risk.price_dev_bps_limit  # 価格逸脱ガード[bps]（STEP34）
 
     # 発注先（dry-run は PaperExchange、live は BybitGateway）
@@ -292,6 +293,9 @@ async def _main_async(env: str, cfg_path: str | None, dry_run: bool, flatten_on_
         trade_ex._rest_semaphore = asyncio.Semaphore(trade_ex._rest_max_concurrency)  # 新しい上限でセマフォを再構築
         trade_ex._rest_cb_fail_threshold = cfg.exchange.rest_cb_fail_threshold  # サーキット連続失敗回数（STEP31）
         trade_ex._rest_cb_open_seconds = cfg.exchange.rest_cb_open_seconds  # サーキット休止秒（STEP31）
+        trade_ex._instrument_info_ttl_s = (
+            cfg.exchange.instrument_info_ttl_s
+        )  # instruments-infoの自動リフレッシュ間隔（秒）
         trade_ex._price_dev_bps_limit = cfg.risk.price_dev_bps_limit  # 価格逸脱ガード[bps]（STEP34）
         oms = OmsEngine(ex=trade_ex, repo=repo, cfg=None)
         # --- 設定の適用：OMS（WS古さブロック、STEP32） ---

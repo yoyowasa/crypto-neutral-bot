@@ -1,6 +1,7 @@
 # これは「注文のライフサイクルを安全に管理するOMSエンジン」を実装するファイルです。
 from __future__ import annotations
 
+import logging  # 構造化ログ（運用監査）用にloggerを使う
 import random
 import time
 from decimal import Decimal  # 価格のズレをbpsで計算するために使用
@@ -41,6 +42,7 @@ class OmsEngine:
         self._ex = ex
         self._repo = repo
         self._cfg = cfg or OmsConfig()
+        self._log = logging.getLogger(__name__)  # このOMSの監査ログ出力口
         self._orders: dict[str, ManagedOrder] = {}  # key: client_id
         # WS ライブネスのメモとブロックしきい値（デフォルト値は安全側）
         self._ws_private_last_ms: int = 0
@@ -271,6 +273,12 @@ class OmsEngine:
         if eid and (event_ms is not None):
             last_ms = self._last_event_ms.get(eid)
             if (last_ms is not None) and (event_ms < last_ms):
+                self._log.debug(
+                    "guard.drop_old_event id=%s event_ms=%s last_ms=%s",
+                    eid,
+                    event_ms,
+                    last_ms,
+                )  # 古いWSイベントを捨てた
                 return  # すでにより新しい状態を処理済み。古いイベントは静かに無視する
 
         cid = event.get("client_id") or event.get("clientOrderId") or event.get("orderLinkId") or event.get("clientId")
@@ -391,6 +399,9 @@ class OmsEngine:
                     cid = getattr(o, "client_order_id", None) or getattr(o, "client_id", None)
                 if cid:
                     self._inflight_client_ids.add(str(cid))
+            self._log.info(
+                "reconcile.inflight_restored symbol=%s count=%d", sym, len(open_orders)
+            )  # 取引所側open注文からinflightを復元
 
     def _note_rejection(self, symbol: str) -> None:
         """この銘柄でREJECTEDが発生したことを記録し、短時間に連発したらクールダウンに入れる。"""
@@ -410,6 +421,13 @@ class OmsEngine:
             cnt = 1
 
         if cnt >= self._reject_burst_threshold:
+            self._log.warning(
+                "cooldown.enter symbol=%s window_ms=%d threshold=%d cooldown_ms=%d",
+                symbol,
+                self._reject_window_ms,
+                self._reject_burst_threshold,
+                self._symbol_cooldown_ms,
+            )  # REJECT連発→クールダウン突入
             self._symbol_cooldown_until[symbol] = now_ms + self._symbol_cooldown_ms
             # 次の連発を独立に数える
             self._reject_window[symbol] = (now_ms, 0)
@@ -506,6 +524,14 @@ class OmsEngine:
                             price_str,
                             desired,
                         )
+                        self._log.info(
+                            "chase.amend symbol=%s side=%s eid=%s desired=%s bps=%s",
+                            sym,
+                            side,
+                            eid,
+                            desired,
+                            str(bps),
+                        )  # チェイスで価格をやさしく寄せた
                     except Exception:
                         pass
                     self._last_amend_ms[eid] = now_ms

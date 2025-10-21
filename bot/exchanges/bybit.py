@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio  # REST同時実行をセマフォで制御して429を予防するために使う
 import hmac
 import json
+import logging  # 構造化ログ（運用監査）用にloggerを使う
 import time
 from contextlib import suppress  # これは何をするimport？→ close時の例外を握りつぶして穏当に終了する
 from dataclasses import dataclass
@@ -51,6 +52,13 @@ class _RestWrapper:
         cb_until = getattr(self._owner, "_rest_cb_open_until", None)
         if cb_until is not None:
             if utc_now() < cb_until:
+                try:
+                    self._owner._log.warning(
+                        "rest.circuit_open seconds=%d",
+                        getattr(self._owner, "_rest_cb_open_seconds", 0),
+                    )
+                except Exception:
+                    pass
                 raise RateLimitError("REST circuit open (cooling down)")
             # cooldown finished; clear
             self._owner._rest_cb_open_until = None
@@ -65,6 +73,14 @@ class _RestWrapper:
                 # failure path: increment and possibly open breaker
                 self._owner._rest_cb_failures += 1
                 if self._owner._rest_cb_failures >= getattr(self._owner, "_rest_cb_fail_threshold", 5):
+                    try:
+                        self._owner._log.warning(
+                            "rest.circuit_trip threshold=%d open_seconds=%d",
+                            getattr(self._owner, "_rest_cb_fail_threshold", 0),
+                            getattr(self._owner, "_rest_cb_open_seconds", 0),
+                        )
+                    except Exception:
+                        pass
                     seconds = getattr(self._owner, "_rest_cb_open_seconds", 3)
                     self._owner._rest_cb_open_until = utc_now() + timedelta(seconds=seconds)
                     self._owner._rest_cb_failures = 0
@@ -91,6 +107,7 @@ class BybitGateway(ExchangeGateway):
         """
 
         self._auth = _Auth(api_key=api_key, api_secret=api_secret, testnet=(environment != "mainnet"))
+        self._log = logging.getLogger(__name__)  # このゲートウェイの監査ログ出力口
 
         # --- REST (CCXT) 初期化 ---
         self._ccxt = ccxt.bybit(
@@ -113,10 +130,11 @@ class BybitGateway(ExchangeGateway):
         # self._ccxt は上で作成済み
         self._symbol_category_cache: dict[str, str] = (
             {}
-        )  # instruments-infoで判定したカテゴリ(spot/linear/inverse)の簡易キャッシュ
+        )  # {symbol: {"info": {...}, "ts": datetime}} に拡張（TTL付きキャッシュ）
         self._instrument_info_cache: dict[str, dict] = (
             {}
-        )  # instruments-infoのtickSize/qtyStep等をキャッシュしてREST前の丸めに使う
+        )  # {symbol: {"info": {...}, "ts": datetime}} に拡張（TTL付きキャッシュ）
+        self._instrument_info_ttl_s: int = 300  # instruments-info のキャッシュ有効期限（秒）。過ぎたら自動で再取得する
         self._bbo_cache: dict[str, dict] = (
             {}
         )  # 公開WS由来の最良気配(bid/ask/ts)をキャッシュしてPostOnly調整等で即時利用
@@ -657,7 +675,9 @@ class BybitGateway(ExchangeGateway):
         まずは Ticker（早い・軽い）で取り、足りなければ履歴+仕様でやさしく補完する。
         """
 
-        category = await self._resolve_category(symbol)  # instruments-infoで正しいカテゴリを特定してからAPIを呼ぶ
+        category = await self._resolve_category(
+            symbol
+        )  # {symbol: {"info": {...}, "ts": datetime}} に拡張（TTL付きキャッシュ）
         try:
             res = await self._rest(
                 self._ccxt.publicGetV5MarketTickers, {"category": category, "symbol": symbol}
@@ -759,7 +779,9 @@ class BybitGateway(ExchangeGateway):
         - なければ client_order_id（= orderLinkId）で確実に取り消す
         """
 
-        category = await self._resolve_category(symbol)  # instruments-infoで正しいカテゴリを特定してからAPIを呼ぶ
+        category = await self._resolve_category(
+            symbol
+        )  # {symbol: {"info": {...}, "ts": datetime}} に拡張（TTL付きキャッシュ）
         try:
             params: dict[str, Any] = {"category": category, "symbol": symbol}
             if order_id:
@@ -817,32 +839,42 @@ class BybitGateway(ExchangeGateway):
     async def _get_instrument_info(self, symbol: str) -> dict:
         """Bybit v5 instruments-infoから、この銘柄のtickSize/qtyStep/最小最大を取得しキャッシュして返す。"""
 
-        cached = self._instrument_info_cache.get(symbol)
-        if cached:
-            return cached
+        cache = self._instrument_info_cache.get(symbol)
+        now = utc_now()
+        if cache:
+            ts = cache.get("ts")
+            if isinstance(ts, datetime):
+                age = (now - ts).total_seconds()
+                if age <= getattr(self, "_instrument_info_ttl_s", 300):
+                    return cache.get("info") or cache
 
         category = await self._resolve_category(symbol)
-        api_symbol = symbol[:-5] if symbol.endswith("_SPOT") else symbol
-        res = await self._rest(
-            self._ccxt.publicGetV5MarketInstrumentsInfo,
-            {"category": category, "symbol": api_symbol},
-        )  # instruments-infoも共通ラッパ
-        items = (res or {}).get("result", {}).get("list", []) or []
-        if not items:
-            raise DataError(f"instruments-info not found: symbol={symbol}")
-        info = items[0]
-        price_filter = info.get("priceFilter", {}) or {}
-        lot_filter = info.get("lotSizeFilter", {}) or {}
-        out = {
-            "tick_size": price_filter.get("tickSize"),
-            "min_price": price_filter.get("minPrice"),
-            "max_price": price_filter.get("maxPrice"),
-            "qty_step": lot_filter.get("qtyStep"),
-            "min_order_qty": lot_filter.get("minOrderQty"),
-            "max_order_qty": lot_filter.get("maxOrderQty"),
-        }
-        self._instrument_info_cache[symbol] = out
-        return out
+        try:
+            api_symbol = symbol[:-5] if symbol.endswith("_SPOT") else symbol
+            res = await self._rest(
+                self._ccxt.publicGetV5MarketInstrumentsInfo,
+                {"category": category, "symbol": api_symbol},
+            )
+            items = (res or {}).get("result", {}).get("list", []) or []
+            if not items:
+                raise DataError(f"instruments-info not found: symbol={symbol}")
+            info_raw = items[0]
+            price_filter = info_raw.get("priceFilter", {}) or {}
+            lot_filter = info_raw.get("lotSizeFilter", {}) or {}
+            info = {
+                "tick_size": price_filter.get("tickSize"),
+                "min_price": price_filter.get("minPrice"),
+                "max_price": price_filter.get("maxPrice"),
+                "qty_step": lot_filter.get("qtyStep"),
+                "min_order_qty": lot_filter.get("minOrderQty"),
+                "max_order_qty": lot_filter.get("maxOrderQty"),
+            }
+            self._instrument_info_cache[symbol] = {"info": info, "ts": now}
+            return info
+        except Exception:
+            if cache:
+                return cache.get("info") or cache
+            raise
 
     async def _normalize_price_qty(
         self,
@@ -899,8 +931,8 @@ class BybitGateway(ExchangeGateway):
         その後、tick に合わせて（安全側へ）丸め直して返す。
         取得失敗などの場合は入力価格をそのまま返す。
         """
-
-        # まずWSキャッシュのBBOを使い、無ければRESTで補う
+        orig_px = Decimal(str(price_str))  # ログのため、補正前の価格を覚える
+        # WSキャッシュのBBO優先、なければREST
         bid_str, ask_str = await self._get_bbo_if_fresh(symbol)  # 鮮度ガード付きBBO取得（古ければRESTで補う）
         if not bid_str and not ask_str:
             return price_str  # BBOが無ければ調整しない
@@ -935,6 +967,21 @@ class BybitGateway(ExchangeGateway):
                 pass
 
         px = self._quantize_step(px, tick_d)
+        try:
+            changed = orig_px != px
+        except Exception:
+            changed = False
+        if changed:
+            try:
+                self._log.debug(
+                    "postonly.adjust symbol=%s side=%s from=%s to=%s",
+                    symbol,
+                    side,
+                    self._dec_to_str(orig_px),
+                    self._dec_to_str(px),
+                )
+            except Exception:
+                pass
         return self._dec_to_str(px)
 
     async def _guard_price_deviation(self, symbol: str, side: str, price_str: str) -> None:
@@ -950,6 +997,17 @@ class BybitGateway(ExchangeGateway):
             bps = (abs(px - mid) / mid) * Decimal("10000")
             limit = Decimal(str(self._price_dev_bps_limit)) if self._price_dev_bps_limit is not None else None
             if (limit is not None) and (bps > limit):
+                try:
+                    self._log.warning(
+                        "guard.price_deviation symbol=%s side=%s bps=%s limit=%s price=%s",
+                        symbol,
+                        side,
+                        str(bps),
+                        str(limit),
+                        price_str,
+                    )
+                except Exception:
+                    pass
                 raise RiskBreach(f"price deviation {bps}bps exceeds {limit}bps (symbol={symbol}, side={side})")
         except Exception:
             # 価格計算に失敗しても送信は阻害しない（安全側にスキップ）
@@ -1033,6 +1091,16 @@ class BybitGateway(ExchangeGateway):
                 },
             )  # 既存照会もラッパ経由
             items = (res or {}).get("result", {}).get("list", []) or []
+            if items:
+                try:
+                    self._log.info(
+                        "idempotent.create.found symbol=%s orderLinkId=%s orderId=%s",
+                        symbol,
+                        client_order_id,
+                        items[0].get("orderId"),
+                    )
+                except Exception:
+                    pass
             return items[0] if items else None
         except Exception:
             return None
@@ -1085,6 +1153,15 @@ class BybitGateway(ExchangeGateway):
             except Exception:
                 still_open = True
             if not still_open:
+                try:
+                    self._log.info(
+                        "idempotent.cancel.already_closed symbol=%s order_id=%s client_order_id=%s",
+                        symbol,
+                        order_id,
+                        client_order_id,
+                    )
+                except Exception:
+                    pass
                 return
             if isinstance(e, ccxt.RateLimitExceeded):
                 raise RateLimitError(str(e)) from e
