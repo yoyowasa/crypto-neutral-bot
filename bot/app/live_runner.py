@@ -4,6 +4,7 @@ from __future__ import annotations
 # --env で環境切替、--dry-run で PaperExchange を使い実発注せずに全経路を通します。
 import argparse
 import asyncio
+import logging  # ops-check の結果をログに出すために使う
 from typing import Any
 
 from loguru import logger
@@ -248,7 +249,9 @@ async def _strategy_step_once(
         await strategy.step(funding=funding, spot_price=spot_price, perp_price=perp_price)
 
 
-async def _main_async(env: str, cfg_path: str | None, dry_run: bool, flatten_on_exit: bool) -> None:
+async def _main_async(
+    env: str, cfg_path: str | None, dry_run: bool, flatten_on_exit: bool, ops_check: bool = False
+) -> None:
     """これは何をする関数？
     → 設定・ログ・DB を初期化し、dry-run/実発注のいずれかで戦略を起動します。
     """
@@ -283,6 +286,28 @@ async def _main_async(env: str, cfg_path: str | None, dry_run: bool, flatten_on_
     data_ex._rest_cb_open_seconds = cfg.exchange.rest_cb_open_seconds  # サーキット休止秒（STEP31）
     data_ex._instrument_info_ttl_s = cfg.exchange.instrument_info_ttl_s  # instruments-infoの自動リフレッシュ間隔（秒）
     data_ex._price_dev_bps_limit = cfg.risk.price_dev_bps_limit  # 価格逸脱ガード[bps]（STEP34）
+
+    # 健診モード：各シンボルの Funding / BBO / 認証REST（open orders）を点検して終了する
+    if ops_check:
+        syms = list(getattr(cfg.strategy, "symbols", []))
+        for sym in syms:
+            fi = await data_ex.get_funding_info(sym)
+            bid, ask = await data_ex.get_bbo(sym)
+            try:
+                oo = await data_ex.get_open_orders(sym)
+            except Exception:
+                oo = []
+            logging.info(
+                "ops.check symbol=%s funding=%s next=%s bbo=(%s,%s) open=%d",
+                sym,
+                getattr(fi, "predicted_rate", None),
+                getattr(fi, "next_funding_time", None),
+                bid,
+                ask,
+                len(oo),
+            )
+        await data_ex.close()
+        return
 
     # 発注先（dry-run は PaperExchange、live は BybitGateway）
     if dry_run:
@@ -420,6 +445,11 @@ def main() -> None:
     parser.add_argument("--config", type=str, default=None, help="path to config/app.yaml (loader reads by default)")
     parser.add_argument("--dry-run", action="store_true", help="use PaperExchange (no real orders)")
     parser.add_argument("--flatten-on-exit", action="store_true", help="flatten all positions on shutdown")
+    parser.add_argument(
+        "--ops-check",
+        action="store_true",
+        help="本番前ドライラン健診モード（Funding/BBO/認証RESTを確認して即終了）",
+    )
     args = parser.parse_args()
 
     try:
@@ -429,6 +459,7 @@ def main() -> None:
                 cfg_path=args.config,
                 dry_run=bool(args.dry_run),
                 flatten_on_exit=bool(args.flatten_on_exit),
+                ops_check=bool(getattr(args, "ops_check", False)),
             )
         )
     except KeyboardInterrupt:

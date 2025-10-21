@@ -104,6 +104,24 @@ Paper 互換（試験用）
 - guard.* / cooldown.* / rest.circuit_* / postonly.adjust / chase.amend / idempotent.*
   → いつ・なぜ止めた/待った/直したか、1行で追跡可能。
 
+Ops-Check（本番前ドライラン健診）
+- 目的
+  - 実運用に入る直前、設定/鍵/ネットワークを安全に三点チェック（Funding/BBO/認証REST）して即終了する。
+- 使い方
+  - Testnet: `python -m bot.app.live_runner --env testnet --ops-check`
+  - Mainnet: `scripts/start_mainnet.sh --ops-check`（または PowerShell 版）
+- 出力（例）
+  - `ops.check symbol=BTCUSDT funding=0.0001 next=2025-01-01T01:00:00Z bbo=(12345.6,12345.7) open=0`
+  - 発注ループには入らない（健診のみ）。
+
+本番向けサンプル設定と起動
+- サンプル設定: `config/app.mainnet.example.yaml`
+  - allow_live: true を明示（本番保護の明示許可）
+  - rest_max_concurrency / rest_cb_* / instrument_info_ttl_s / bbo_max_age_ms など本番寄りの推奨値を同梱
+- 起動スクリプト
+  - `scripts/start_mainnet.sh` / `scripts/start_mainnet.ps1`
+  - `.env` の読み込み、`EXCHANGE__ALLOW_LIVE=true` の明示、`APP_CONFIG_FILE` 既定化、`--env mainnet` 起動
+
 git add -A
 git commit -m "chore: initial upload"   # ←必ずメッセージを入れる
 git push                                 # -u は既に済みなので不要
