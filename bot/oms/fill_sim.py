@@ -210,6 +210,19 @@ class PaperExchange(ExchangeGateway):
 
     # ---------- WS（Public）の受信ハンドラ ----------
 
+    async def amend_order(
+        self,
+        symbol: str,
+        order_id: str | None = None,
+        client_order_id: str | None = None,
+        new_price: object | None = None,
+        new_qty: object | None = None,
+        side: str | None = None,
+        post_only: bool | None = None,
+        time_in_force: str | None = None,
+    ) -> None:  # Paperでは何もしない（型と呼び出し整合のためのスタブ）
+        return
+
     async def handle_public_msg(self, msg: dict) -> None:
         """これは何をする関数？
         → Bybit v5 Public WS からの raw メッセージ（orderbook/publicTrade）を受け取り、BBO/last を更新し、

@@ -85,6 +85,9 @@ async def _handle_private_order(msg: dict, oms: OmsEngine) -> None:
         event["updated_at"] = (
             row.get("updatedTime") or row.get("uTime") or row.get("updateTime") or row.get("ts") or row.get("t")
         )  # この注文更新の発生時刻（後段で順序判定に使う）
+        oms.touch_private_ws(
+            row.get("updatedTime") or row.get("uTime") or row.get("ts") or row.get("t")
+        )  # Private WSの受信をOMSに合図
         await oms.on_execution_event(event)
 
 
@@ -106,6 +109,9 @@ async def _handle_private_execution(msg: dict, oms: OmsEngine) -> None:
         event["updated_at"] = (
             row.get("execTime") or row.get("updatedTime") or row.get("uTime") or row.get("ts") or row.get("t")
         )  # この出来の発生時刻（順序判定に使う）
+        oms.touch_private_ws(
+            row.get("execTime") or row.get("updatedTime") or row.get("uTime") or row.get("ts") or row.get("t")
+        )  # 約定メッセージでも合図
         await oms.on_execution_event(event)
 
 

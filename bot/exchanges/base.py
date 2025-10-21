@@ -45,3 +45,16 @@ class ExchangeGateway:
     ) -> None:
         """Public WSに購読し、コールバックへ通知する"""
         raise NotImplementedError
+
+    async def amend_order(
+        self,
+        symbol: str,
+        order_id: str | None = None,
+        client_order_id: str | None = None,
+        new_price: object | None = None,
+        new_qty: object | None = None,
+        side: str | None = None,
+        post_only: bool | None = None,
+        time_in_force: str | None = None,
+    ) -> None:  # 既存注文の価格/数量/TIFを安全に修正する入口。orderIdかclient_order_idのどちらかで特定する。
+        raise NotImplementedError

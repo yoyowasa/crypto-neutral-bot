@@ -10,6 +10,7 @@ from loguru import logger
 from bot.core.errors import (
     ExchangeError,
     RiskBreach,  # 二重発注を止めるための制御用エラー（リスク違反として扱う）
+    WsDisconnected,  # WSが古いときに新規発注をブロックするための例外
 )
 from bot.core.time import (
     parse_exchange_ts,  # 取引所/WSの時刻表現をUTC awareに直すため（順序判定で使う）
@@ -56,6 +57,15 @@ class OmsEngine:
         nonce = random.randint(1000, 9999)
         return f"{prefix}-{ms}-{nonce}"
 
+    def touch_private_ws(self, ts: object | None = None) -> None:
+        """Private WSを受け取った合図。取引所形式のtsでも、そのままNoneでもOK。内部でUTC msに正規化して保存する。"""
+        try:
+            dt = utc_now() if ts in (None, "") else parse_exchange_ts(ts)  # 取引所/WSの時刻表現をUTC awareに変換
+            self._ws_private_last_ms = int(dt.timestamp() * 1000)
+        except Exception:
+            # 時刻が読めなくても、最低限「いま来た」ことは記録する
+            self._ws_private_last_ms = int(utc_now().timestamp() * 1000)
+
     # ---------- 発注/取消API ----------
 
     async def submit(self, req: OrderRequest) -> Order:
@@ -76,6 +86,16 @@ class OmsEngine:
         req.client_order_id = coid
         if coid in self._inflight_client_ids:
             raise RiskBreach(f"duplicate client_order_id (idempotent submit): {coid}")  # 同じIDでの二重発注をブロック
+        # Private WS ライブネス・ガード：直近の受信が古すぎれば新規発注はブロック
+        now_ms = int(utc_now().timestamp() * 1000)
+        if getattr(self, "_ws_private_last_ms", 0) and (now_ms - self._ws_private_last_ms) > getattr(
+            self, "_ws_stale_block_ms", 10_000
+        ):
+            raise WsDisconnected(
+                "private WS stale: "
+                f"{(now_ms - self._ws_private_last_ms)}ms > "
+                f"{getattr(self, '_ws_stale_block_ms', 10000)}ms"
+            )
         self._inflight_client_ids.add(coid)  # 今回送るIDをメモして二重送信を防止
 
         if not req.client_id:
@@ -181,6 +201,29 @@ class OmsEngine:
             client_id=self._gen_client_id("hedge"),
         )
         await self.submit(req)
+
+    async def amend(
+        self,
+        order,
+        new_price: object | None = None,
+        new_qty: object | None = None,
+        post_only: bool | None = None,
+        time_in_force: str | None = None,
+    ) -> None:
+        """手元のOrderを修正する入口。IDを取り出してゲートウェイへ渡すだけ（実処理はExchange側）。"""
+        cid = getattr(order, "client_order_id", None)
+        ex_order_id = getattr(order, "order_id", None) or getattr(order, "exchange_order_id", None)
+        side = getattr(order, "side", None)
+        await self._ex.amend_order(
+            symbol=order.symbol,
+            order_id=ex_order_id,
+            client_order_id=cid,
+            new_price=new_price,
+            new_qty=new_qty,
+            side=side,
+            post_only=post_only,
+            time_in_force=time_in_force,
+        )
 
     # ---------- イベント取り込み ----------
 

@@ -16,7 +16,7 @@ from typing import Any, Awaitable, Callable
 import ccxt.async_support as ccxt  # CCXT の async 版を使う（REST はこれで十分）
 import websockets
 
-from bot.core.errors import DataError, ExchangeError, RateLimitError, WsDisconnected
+from bot.core.errors import DataError, ExchangeError, RateLimitError, RiskBreach, WsDisconnected
 from bot.core.retry import retryable  # REST呼び出しに指数バックオフ再試行を付与するデコレータ
 from bot.core.time import (
     parse_exchange_ts,
@@ -121,6 +121,9 @@ class BybitGateway(ExchangeGateway):
             {}
         )  # 公開WS由来の最良気配(bid/ask/ts)をキャッシュしてPostOnly調整等で即時利用
         self._bbo_max_age_ms: int = 3000  # BBO freshness threshold (ms)
+        self._price_dev_bps_limit: int | None = (
+            50  # BBO中値からの最大乖離[bps]。Noneならガード無効（設定化は後続STEPで）
+        )
 
         self._rest_max_concurrency: int = 4  # RESTの同時実行上限。環境に応じて調整可能（429予防）
         self._rest_semaphore = asyncio.Semaphore(self._rest_max_concurrency)  # 上限を守るセマフォ
@@ -319,6 +322,12 @@ class BybitGateway(ExchangeGateway):
                     params["price"] = await self._ensure_post_only_price(req.symbol, req.side, params["price"])
                 except Exception:
                     pass
+            if (
+                (req.type or "").lower().startswith("limit")
+                and ("price" in params)
+                and (self._price_dev_bps_limit is not None)
+            ):
+                await self._guard_price_deviation(req.symbol, req.side, params["price"])  # BBO中値からの乖離を安全確認
             price = float(params["price"]) if ("price" in params and params["price"] is not None) else None
             try:
                 created = await self._ccxt.create_order(
@@ -911,6 +920,24 @@ class BybitGateway(ExchangeGateway):
         px = self._quantize_step(px, tick_d)
         return self._dec_to_str(px)
 
+    async def _guard_price_deviation(self, symbol: str, side: str, price_str: str) -> None:
+        """BBO中値からの乖離[bps]が上限を超えたら RiskBreach を投げて送信を止める（安全のための見張り）"""
+        bid_str, ask_str = await self._get_bbo_if_fresh(symbol)
+        if not bid_str or not ask_str:
+            return  # BBOが無ければスキップ
+        try:
+            mid = (Decimal(str(bid_str)) + Decimal(str(ask_str))) / Decimal("2")
+            if mid <= 0:
+                return
+            px = Decimal(str(price_str))
+            bps = (abs(px - mid) / mid) * Decimal("10000")
+            limit = Decimal(str(self._price_dev_bps_limit)) if self._price_dev_bps_limit is not None else None
+            if (limit is not None) and (bps > limit):
+                raise RiskBreach(f"price deviation {bps}bps exceeds {limit}bps (symbol={symbol}, side={side})")
+        except Exception:
+            # 価格計算に失敗しても送信は阻害しない（安全側にスキップ）
+            return
+
     def update_bbo(
         self, symbol: str, bid: str | float | None, ask: str | float | None, ts: int | str | None = None
     ) -> None:
@@ -1045,3 +1072,102 @@ class BybitGateway(ExchangeGateway):
             if isinstance(e, ccxt.RateLimitExceeded):
                 raise RateLimitError(str(e)) from e
             raise ExchangeError(f"cancel_order failed: {e}") from e
+
+    @retryable()  # 一過性エラーに強くする（STEP19）
+    async def amend_order(
+        self,
+        symbol: str,
+        order_id: str | None = None,
+        client_order_id: str | None = None,
+        new_price: object | None = None,
+        new_qty: object | None = None,
+        side: str | None = None,
+        post_only: bool | None = None,
+        time_in_force: str | None = None,
+    ) -> None:
+        """Bybit v5 /v5/order/amend で既存注文を安全に修正する。
+        - price/qtyはtickSize/qtyStepへ丸め（STEP21）
+        - PostOnlyならBBO基準で非クロスに微調整（STEP24/25/28）
+        - IDはorderId優先、無ければorderLinkId（=client_order_id）
+        """
+
+        if not any([new_price is not None, new_qty is not None, post_only is not None, time_in_force]):
+            return  # 変更点なしなら何もしない
+
+        category = await self._resolve_category(symbol)  # 正しいカテゴリを特定（STEP20）
+
+        # sideが無い時は既存注文から補う（可能なら）
+        if side is None:
+            existing = None
+            if client_order_id:
+                existing = await self._find_existing_order(symbol, client_order_id)  # STEP26のヘルパー
+            if (existing is None) and order_id:
+                try:
+                    res = await self._rest(
+                        self._ccxt.privateGetV5OrderRealtime,
+                        {"category": category, "symbol": symbol, "orderId": order_id},
+                    )
+                    items = (res or {}).get("result", {}).get("list", []) or []
+                    existing = items[0] if items else None
+                except Exception:
+                    existing = None
+            if existing:
+                side = existing.get("side")
+
+        params: dict[str, Any] = {"category": category, "symbol": symbol}
+        if order_id:
+            params["orderId"] = order_id
+        if client_order_id:
+            params["orderLinkId"] = client_order_id
+
+        # instruments-info（tick/step/min/max）を取得（STEP21）
+        info = await self._get_instrument_info(symbol)
+
+        # --- 数量の修正（ある時だけ） ---
+        if new_qty is not None:
+            dqty = Decimal(str(new_qty))
+            step = Decimal(str(info["qty_step"])) if info.get("qty_step") not in (None, "") else None
+            if step is not None:
+                dqty = self._quantize_step(dqty, step)
+            min_q = Decimal(str(info["min_order_qty"])) if info.get("min_order_qty") not in (None, "") else None
+            max_q = Decimal(str(info["max_order_qty"])) if info.get("max_order_qty") not in (None, "") else None
+            if min_q and dqty < min_q:
+                raise DataError(f"amend qty below minOrderQty: {dqty} < {min_q} ({symbol})")
+            if max_q and dqty > max_q:
+                dqty = self._quantize_step(max_q, step or Decimal("1"))
+            if dqty <= 0:
+                raise DataError(f"amend qty rounded to zero for {symbol}")
+            params["qty"] = self._dec_to_str(dqty)
+
+        # --- 価格の修正（ある時だけ） ---
+        if new_price is not None:
+            dpx = Decimal(str(new_price))
+            tick = Decimal(str(info["tick_size"])) if info.get("tick_size") not in (None, "") else None
+            if tick is not None:
+                dpx = self._quantize_step(dpx, tick)
+            min_p = Decimal(str(info["min_price"])) if info.get("min_price") not in (None, "") else None
+            max_p = Decimal(str(info["max_price"])) if info.get("max_price") not in (None, "") else None
+            if min_p and dpx < min_p:
+                dpx = self._quantize_step(min_p, tick or Decimal("1"))
+            if max_p and dpx > max_p:
+                dpx = self._quantize_step(max_p, tick or Decimal("1"))
+            price_str = self._dec_to_str(dpx)
+
+            # PostOnlyなら非クロスに微調整（BBOキャッシュ優先、鮮度ガード付き）
+            is_post_only = bool(post_only) or (time_in_force == "PostOnly")
+            if is_post_only and (side is not None):
+                price_str = await self._ensure_post_only_price(symbol, side, price_str)
+            params["price"] = price_str
+
+        # --- TIF/PostOnly の適用（任意） ---
+        if post_only:
+            params["timeInForce"] = "PostOnly"
+        elif time_in_force:
+            params["timeInForce"] = time_in_force
+
+        # 価格乖離ガード（BBO中値からの最大乖離[bps]を超える場合はブロック）
+        if params.get("price") and (self._price_dev_bps_limit is not None):
+            await self._guard_price_deviation(symbol, side or "", params["price"])  # 修正価格の乖離を安全確認
+
+        # 実行（RESTは統一ラッパ経由・セマフォ/サーキット付き：STEP29/31）
+        await self._rest(self._ccxt.privatePostV5OrderAmend, params)
