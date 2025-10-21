@@ -41,13 +41,34 @@ class _RestWrapper:
     - 未定義の属性は ccxt インスタンスへフォワード
     """
 
-    def __init__(self, semaphore: asyncio.Semaphore, ccxt_exchange: Any) -> None:
+    def __init__(self, owner: "BybitGateway", semaphore: asyncio.Semaphore, ccxt_exchange: Any) -> None:
+        self._owner = owner
         self._sem = semaphore
         self._ccxt = ccxt_exchange
 
     async def __call__(self, func, params: dict) -> dict:
+        # Circuit breaker: if cooling down, surface to @retryable
+        cb_until = getattr(self._owner, "_rest_cb_open_until", None)
+        if cb_until is not None:
+            if utc_now() < cb_until:
+                raise RateLimitError("REST circuit open (cooling down)")
+            # cooldown finished; clear
+            self._owner._rest_cb_open_until = None
+
         async with self._sem:
-            return await func(params)
+            try:
+                res = await func(params)
+                # success: reset failure counter
+                self._owner._rest_cb_failures = 0
+                return res
+            except Exception:
+                # failure path: increment and possibly open breaker
+                self._owner._rest_cb_failures += 1
+                if self._owner._rest_cb_failures >= getattr(self._owner, "_rest_cb_fail_threshold", 5):
+                    seconds = getattr(self._owner, "_rest_cb_open_seconds", 3)
+                    self._owner._rest_cb_open_until = utc_now() + timedelta(seconds=seconds)
+                    self._owner._rest_cb_failures = 0
+                raise
 
     async def close(self) -> None:
         close = getattr(self._ccxt, "close", None)
@@ -103,8 +124,13 @@ class BybitGateway(ExchangeGateway):
 
         self._rest_max_concurrency: int = 4  # RESTの同時実行上限。環境に応じて調整可能（429予防）
         self._rest_semaphore = asyncio.Semaphore(self._rest_max_concurrency)  # 上限を守るセマフォ
+        # RESTサーキットブレーカ状態
+        self._rest_cb_failures: int = 0  # 連続失敗回数（成功したら0に戻す）
+        self._rest_cb_fail_threshold: int = 5  # この回数だけ連続で失敗したら休憩に入る
+        self._rest_cb_open_seconds: int = 3  # 休憩する秒数（短く小さく、再開はすぐ）
+        self._rest_cb_open_until: datetime | None = None  # 休憩を終える時刻（UTC）。過ぎたら自動で開通
         # _rest を callable + closable なラッパにして互換性を保つ
-        self._rest = _RestWrapper(self._rest_semaphore, self._ccxt)
+        self._rest = _RestWrapper(self, self._rest_semaphore, self._ccxt)
 
         # --- WS エンドポイント（Bybit v5 公式・要確認 & 必要に応じて linear/inverse/spot を選択） ---
         # Public:
