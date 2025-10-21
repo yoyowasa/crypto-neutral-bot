@@ -1,3 +1,109 @@
+プロジェクト全体のざっくりMEMO（実運用ボットの構成と役割）
+
+目的
+- Bybit v5 を対象に、資金調達（Funding）/ベーシス戦略の実運用ボットを安全ガード付きで動かす。
+- Testnet と Mainnet を切り替え可能（Mainnet は allow_live スイッチで明示許可）。
+
+実行エントリ
+- bot/app/live_runner.py
+  - 本番/テストネットでの実行ランナー。設定読み込み、ゲートウェイ/OMS/戦略/メトリクス/レポートの起動。
+  - 起動保護: environment=mainnet かつ exchange.allow_live=false の場合は起動停止（ConfigError）。
+  - 設定値を BybitGateway/OMS に反映（RESTセマフォ/サーキット/TTL/BBO鮮度/価格逸脱/WS古さ/クールダウンなど）。
+
+- bot/app/paper_runner.py
+  - Paper（疑似）実行ランナー。実注文は出さず、Public WS/BBO を使って PaperExchange による約定シミュレーションを行う。
+
+- scripts/start_mainnet.sh / scripts/start_mainnet.ps1
+  - 本番起動用のスクリプト。EXCHANGE__ALLOW_LIVE の明示、APP_CONFIG_FILE の既定化、--env mainnet で起動。
+
+設定（型とローダ）
+- bot/config/models.py
+  - ExchangeConfig: 接続/WS URL、セマフォ/サーキット、BBO鮮度、instruments-info TTL、allow_live 等。
+  - RiskConfig: 価格逸脱[bps]、Private WS 古さブロック、REJECT連発→シンボルクールダウン等。
+  - StrategyFundingConfig: 対象シンボル、チェイサ（PostOnly 価格追従）の頻度/上限など。
+  - AppConfig: ルート設定。
+
+- bot/config/loader.py
+  - .env → YAML（config/app.yaml）→ 環境変数の優先でマージし、AppConfig を返す。
+  - EXCHANGE__ALLOW_LIVE など環境変数で上書き可能。
+
+取引所ゲートウェイ（Bybit v5）
+- bot/exchanges/bybit.py
+  - REST/WS の統合。主機能:
+    - RESTセマフォ（同時実行上限）: 429 予防。
+    - RESTサーキットブレーカ: 連続失敗で短時間休止。
+    - instruments-info TTL キャッシュ: tickSize/qtyStep/min/max を一定間隔で自動更新（失敗時は古い情報で継続）。
+    - BBO キャッシュ＋鮮度ガード（REST フォールバック含む）。
+    - 価格逸脱ガード: 中値からのズレ[bps]が上限超なら発注/修正をブロック。
+    - PostOnly 非クロス補正（1tick 内側へ微調整）。
+    - 安全アメンド（/v5/order/amend）と冪等（既存注文/取消を発見して安全に扱う）。
+    - 構造化ログ（rest.circuit_*/postonly.adjust/guard.price_deviation/idempotent.*）。
+  - get_open_orders_detailed(): /v5/order/realtime を呼び、PostOnly判定に必要な詳細（timeInForce/side/price 等）を返すヘルパ。
+
+OMS（注文ライフサイクル/安全ガード）
+- bot/oms/engine.py
+  - submit/cancel/amend、タイムアウト処理、idempotency ガード（重複 client_order_id ブロック）。
+  - WSイベント順序ガード: 古い更新を捨てる。
+  - Private WS ライブネス・ガード: WSが古いと新規発注をブロック。
+  - Sybmol クールダウン: REJECTED が短時間に連発した銘柄を一時停止。
+  - メイカーチェイサ: PostOnly の未約定指値を BBO に合わせて安全に寄せる（頻度/回数制限付き）。
+  - メトリクス集計: チェイサ件数/クールダウン件数（期間/累計）を保持し、MetricsLogger から取得可能。
+  - 構造化ログ（guard.*, cooldown.enter, chase.amend など）。
+
+Paper 互換（試験用）
+- bot/oms/fill_sim.py
+  - PaperExchange: Public BBO を使った簡易な Market/Limit 約定シミュレーション。amend はスタブ（型整合）。
+
+戦略
+- bot/strategy/funding_basis/engine.py
+  - Funding/Basis の最小限ステップ（例: step()）。OMS とデータソース（価格/ファンディング）を使う。
+
+コア（共通基盤）
+- bot/core/logging.py: ログ初期化（人向け logs/app.log + JSON logs/app.jsonl の2系統）。
+- bot/core/time.py: 取引所時刻→UTC 変換、utc_now() 等。
+- bot/core/retry.py: @retryable デコレータ（指数バックオフ/最大試行）。
+- bot/core/errors.py: ConfigError/RiskBreach/RateLimitError/ExchangeError 等の例外。
+
+モニタリング
+- bot/monitor/metrics.py
+  - MetricsLogger: 心拍ログ（保有/デルタ/想定PnL 等）に加え、OMS からガード系メトリクス（チェイス/クールダウン件数）を集計表示。
+- bot/monitor/report.py
+  - 日次レポート生成（スケジューラ）。
+
+データ/DB
+- bot/data/repo.py
+  - 取引/ファンディング等の査読用データ永続化（SQLite/SQLAlchemy など、MVP 相当）。
+
+テスト補助/その他
+- tests/*: 主要機能の単体テスト（ネットワーク状況でスキップのあるものもあり）。
+- docs/progress.md: 実装ステップの進捗メモ。
+
+本番保護と起動の流れ
+1) config/app.yaml（または config/app.mainnet.yaml）で exchange.allow_live=true を明示
+2) .env に鍵を設定（KEYS__API_KEY / KEYS__API_SECRET 他）
+3) scripts/start_mainnet.sh（または .ps1）で --env mainnet 起動
+   - live_runner 側で allow_live=false の場合は起動ブロック（誤接続防止）
+
+主要な安全ガード（ざっくり）
+- REST 同時実行セマフォ + サーキット（429/接続断の連鎖予防）
+- instruments-info TTL 自動更新（tick/step/min/max 変更追従）
+- BBO 鮮度ガード（REST フォールバック）、PostOnly 非クロス補正
+- 価格逸脱ガード（中値からの最大乖離[bps]）
+- WS ライブネス・ガード（Private WS が古いと新規発注を停止）
+- REJECT 連発時のシンボル別クールダウン
+- WS イベント順序ガード（古い更新の無視）
+
+チューニングの主な入口（ExchangeConfig / RiskConfig）
+- rest_max_concurrency, rest_cb_fail_threshold, rest_cb_open_seconds
+- bbo_max_age_ms, instrument_info_ttl_s
+- price_dev_bps_limit, ws_stale_block_ms
+- reject_burst_threshold, reject_burst_window_s, symbol_cooldown_s
+- strategy の chase_*（PostOnly 追従の頻度/上限）
+
+ログの見かた（構造化・監査向け）
+- guard.* / cooldown.* / rest.circuit_* / postonly.adjust / chase.amend / idempotent.*
+  → いつ・なぜ止めた/待った/直したか、1行で追跡可能。
+
 git add -A
 git commit -m "chore: initial upload"   # ←必ずメッセージを入れる
 git push                                 # -u は既に済みなので不要
