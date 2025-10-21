@@ -40,6 +40,9 @@ class RiskConfig(BaseModel):
     price_dev_bps_limit: int | None = 50  # BBO中値からの最大乖離[bps]。Noneで無効（STEP34）
     ws_stale_block_ms: int = 10_000  # Private WSが古いとき新規発注を止める閾値（ミリ秒、STEP32）
     # （将来用）prefer_post_only: bool = False  # OPEN系をメイカー優先にしたい場合のフラグ
+    reject_burst_threshold: int = 3  # この回数だけREJECTEDが
+    reject_burst_window_s: int = 30  # この秒数以内に起きたら
+    symbol_cooldown_s: int = 120  # その銘柄の新規発注をこの秒数だけ停止（クールダウン）
 
 
 class StrategyFundingConfig(BaseModel):

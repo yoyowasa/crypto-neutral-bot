@@ -276,6 +276,23 @@ class BybitGateway(ExchangeGateway):
         except Exception as e:  # noqa: BLE001
             raise ExchangeError(f"get_open_orders failed: {e}") from e
 
+    async def get_open_orders_detailed(self, symbol: str) -> list[dict]:
+        """Bybit v5 /v5/order/realtime で詳細フィールド付きの open 注文一覧を返す。
+        - timeInForce / orderType / orderStatus / side / price などを含む辞書のリスト
+        - maintain_postonly_orders などの精緻なフィルタリングに利用
+        """
+
+        try:
+            category = await self._resolve_category(symbol)
+            api_symbol = symbol[:-5] if symbol.endswith("_SPOT") else symbol
+            res = await self._rest(
+                self._ccxt.privateGetV5OrderRealtime,
+                {"category": category, "symbol": api_symbol},
+            )
+            return ((res or {}).get("result", {}) or {}).get("list", []) or []
+        except Exception as e:  # noqa: BLE001
+            raise ExchangeError(f"get_open_orders_detailed failed: {e}") from e
+
     @retryable()  # 発注の一過性失敗（429/接続断など）に対して自動で指数バックオフ再試行する
     async def place_order(self, req: OrderRequest) -> Order:
         """これは何をする関数？→ 注文を発注し、作成された注文情報を返す"""

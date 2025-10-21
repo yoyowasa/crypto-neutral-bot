@@ -278,6 +278,10 @@ async def _main_async(env: str, cfg_path: str | None, dry_run: bool, flatten_on_
         oms = OmsEngine(ex=trade_ex, repo=repo, cfg=None)
         # --- 設定の適用：OMS（WS古さブロック、STEP32） ---
         oms._ws_stale_block_ms = cfg.risk.ws_stale_block_ms
+        # --- 設定の適用：REJECT連発→シンボル一時停止（STEP37） ---
+        oms._reject_burst_threshold = cfg.risk.reject_burst_threshold
+        oms._reject_window_ms = cfg.risk.reject_burst_window_s * 1000
+        oms._symbol_cooldown_ms = cfg.risk.symbol_cooldown_s * 1000
         assert isinstance(trade_ex, PaperExchange)
         trade_ex.bind_oms(oms)
     else:
@@ -292,6 +296,10 @@ async def _main_async(env: str, cfg_path: str | None, dry_run: bool, flatten_on_
         oms = OmsEngine(ex=trade_ex, repo=repo, cfg=None)
         # --- 設定の適用：OMS（WS古さブロック、STEP32） ---
         oms._ws_stale_block_ms = cfg.risk.ws_stale_block_ms
+        # --- 設定の適用：REJECT連発→シンボル一時停止（STEP37） ---
+        oms._reject_burst_threshold = cfg.risk.reject_burst_threshold
+        oms._reject_window_ms = cfg.risk.reject_burst_window_s * 1000
+        oms._symbol_cooldown_ms = cfg.risk.symbol_cooldown_s * 1000
 
     # RiskManager（flatten_all の実体は strategy 経由にする）
     strategy_holder: dict[str, Any] = {}

@@ -45,6 +45,12 @@ class OmsEngine:
         # WS ライブネスのメモとブロックしきい値（デフォルト値は安全側）
         self._ws_private_last_ms: int = 0
         self._ws_stale_block_ms: int = 10_000
+        # REJECT連発→シンボル別クールダウン（デフォルト値、runnerで上書き）
+        self._reject_burst_threshold: int = 3
+        self._reject_window_ms: int = 30_000
+        self._symbol_cooldown_ms: int = 120_000
+        self._reject_window: dict[str, tuple[int, int]] = {}
+        self._symbol_cooldown_until: dict[str, int] = {}
         # PostOnly追従（アメンド）の頻度制御メモ
         self._last_amend_ms: dict[str, int] = {}
         self._amend_count_minute: dict[str, tuple[int, int]] = {}
@@ -103,6 +109,11 @@ class OmsEngine:
                 f"{(now_ms - self._ws_private_last_ms)}ms > "
                 f"{getattr(self, '_ws_stale_block_ms', 10000)}ms"
             )
+        # シンボル別クールダウン（REJECTEDの連発があった直後は新規発注を停止）
+        cool_until = self._symbol_cooldown_until.get(req.symbol)
+        if cool_until and now_ms < cool_until:
+            remaining = cool_until - now_ms
+            raise RiskBreach(f"symbol cooldown active for {req.symbol}: {remaining}ms remaining")
         self._inflight_client_ids.add(coid)  # 今回送るIDをメモして二重送信を防止
 
         if not req.client_id:
@@ -340,6 +351,22 @@ class OmsEngine:
         if eid and (event_ms is not None):
             self._last_event_ms[eid] = event_ms  # 今回のイベントを「最新」として記録する（次回の順序判定に使う）
 
+        # --- REJECTEDが来たら、この銘柄のクールダウン判定を更新 ---
+        try:
+            sym = event.get("symbol") if isinstance(event, dict) else getattr(event, "symbol", None)
+            st_ev = event.get("status") if isinstance(event, dict) else getattr(event, "status", None)
+            if (not sym) and "cid" in locals():
+                try:
+                    mo = self._orders.get(cid)
+                    if mo and getattr(mo, "req", None):
+                        sym = getattr(mo.req, "symbol", None)
+                except Exception:
+                    sym = sym
+            if (sym and st_ev) and (str(st_ev).upper() == "REJECTED"):
+                self._note_rejection(str(sym))
+        except Exception:
+            pass
+
     async def reconcile_inflight_open_orders(self, symbols: list[str]) -> None:
         """取引所に残る open 注文の client_order_id を復元して二重発注を防ぐ。
 
@@ -349,7 +376,11 @@ class OmsEngine:
 
         for sym in symbols:
             try:
-                open_orders = await self._ex.get_open_orders(sym)
+                get_det = getattr(self._ex, "get_open_orders_detailed", None)
+                if callable(get_det):
+                    open_orders = await get_det(sym)
+                else:
+                    open_orders = await self._ex.get_open_orders(sym)
             except Exception:
                 open_orders = []
 
@@ -360,6 +391,28 @@ class OmsEngine:
                     cid = getattr(o, "client_order_id", None) or getattr(o, "client_id", None)
                 if cid:
                     self._inflight_client_ids.add(str(cid))
+
+    def _note_rejection(self, symbol: str) -> None:
+        """この銘柄でREJECTEDが発生したことを記録し、短時間に連発したらクールダウンに入れる。"""
+
+        now_ms = int(utc_now().timestamp() * 1000)
+        rec = self._reject_window.get(symbol)
+        if rec:
+            win_start, cnt = rec
+            if (now_ms - win_start) <= self._reject_window_ms:
+                cnt += 1
+                self._reject_window[symbol] = (win_start, cnt)
+            else:
+                self._reject_window[symbol] = (now_ms, 1)
+                cnt = 1
+        else:
+            self._reject_window[symbol] = (now_ms, 1)
+            cnt = 1
+
+        if cnt >= self._reject_burst_threshold:
+            self._symbol_cooldown_until[symbol] = now_ms + self._symbol_cooldown_ms
+            # 次の連発を独立に数える
+            self._reject_window[symbol] = (now_ms, 0)
 
     async def maintain_postonly_orders(self, symbols: list[str], strat_cfg) -> None:
         """PostOnlyの未約定指値をBBOにあわせて安全に少しだけ寄せる。
@@ -442,6 +495,19 @@ class OmsEngine:
                         side=side,
                         post_only=True,
                     )
+                    # ログ（控えめ）：成功したアメンドのみbpsと価格を記録
+                    try:
+                        logger.info(
+                            "chaser amend: sym={} eid={} side={} bps={} px_old={} px_new={}",
+                            sym,
+                            eid,
+                            side,
+                            round(float(bps), 2),
+                            price_str,
+                            desired,
+                        )
+                    except Exception:
+                        pass
                     self._last_amend_ms[eid] = now_ms
                     if rec and rec[0] == minute:
                         self._amend_count_minute[eid] = (minute, rec[1] + 1)

@@ -48,6 +48,10 @@ async def _run(config_path: str | None) -> None:
     oms = OmsEngine(ex=paper_ex, repo=repo, cfg=None)
     # Paperでも閾値を合わせておく（デフォルトはブロックしない動作）
     oms._ws_stale_block_ms = cfg.risk.ws_stale_block_ms
+    # REJECT連発→シンボル一時停止（STEP37）
+    oms._reject_burst_threshold = cfg.risk.reject_burst_threshold
+    oms._reject_window_ms = cfg.risk.reject_burst_window_s * 1000
+    oms._symbol_cooldown_ms = cfg.risk.symbol_cooldown_s * 1000
     paper_ex.bind_oms(oms)
 
     # Risk（flatten_all は strategy 生成後に呼べるようクロージャで保持）
