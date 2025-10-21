@@ -137,3 +137,17 @@ git --no-pager diff --name-status origin/main
 # 直近コミットIDを比較して一致を確認する
 git --no-pager log -1 --oneline
 git --no-pager log -1 --oneline origin/main
+
+Paper（完全シミュレーション）
+python -m bot.app.paper_runner --config config\app.yaml
+
+Live（Testnet）
+健診のみ（発注せず確認して終了）
+python -m bot.app.live_runner --env testnet --config config/app.yaml --ops-check
+通常起動
+python -m bot.app.live_runner --env testnet --config config/app.yaml
+
+Live（Mainnet）
+.\scripts\start_mainnet.ps1
+健診のみ: 
+.\scripts\start_mainnet.ps1 --ops-check

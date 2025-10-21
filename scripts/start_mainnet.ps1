@@ -1,5 +1,6 @@
 # PowerShell startup for mainnet (Windows)
 param(
+  [Parameter(ValueFromRemainingArguments = $true)]
   [string[]]$ArgsPassthrough
 )
 
@@ -28,5 +29,4 @@ Write-Host "[start_mainnet] EXCHANGE__ALLOW_LIVE=$env:EXCHANGE__ALLOW_LIVE"
 
 New-Item -ItemType Directory -Force -Path logs | Out-Null
 
-python -m bot.app.live_runner --env mainnet @ArgsPassthrough
-
+python -m bot.app.live_runner --env mainnet $ArgsPassthrough
