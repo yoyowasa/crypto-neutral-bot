@@ -50,6 +50,12 @@ class StrategyFundingConfig(BaseModel):
     pre_event_open_minutes: int = 60
     hold_across_events: bool = True
     rebalance_band_bps: float = 5.0
+    # メイカーチェイス（PostOnly指値の安全な価格追従）の設定（控えめなデフォルト）
+    chase_enabled: bool = True  # PostOnly注文の価格追従（アメンド）を有効化するか
+    chase_min_reprice_bps: int = 2  # 中値からのズレがこのbps以上なら価格を修正する
+    chase_min_reprice_ticks: int = 1  # 最低でもこのtick以上ズレていないと修正しない（将来拡張用）
+    chase_interval_ms: int = 1500  # 同じ注文を連続で修正しないための最短間隔（ミリ秒）
+    chase_max_amends_per_min: int = 12  # 1注文あたり1分間の最大修正回数（やりすぎ防止）
 
     def __init__(self, **data: Any) -> None:  # type: ignore[override]
         """初期化時にシンボルの既定値を設定する"""

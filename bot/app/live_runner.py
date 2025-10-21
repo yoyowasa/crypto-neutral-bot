@@ -355,6 +355,8 @@ async def _main_async(env: str, cfg_path: str | None, dry_run: bool, flatten_on_
                     price_source=price_source,
                     funding_source=data_ex,
                 )
+                # PostOnly指値の安全な価格追従（控えめにアメンド）
+                await oms.maintain_postonly_orders(cfg.strategy.symbols, cfg.strategy)
             except Exception as e:  # noqa: BLE001
                 logger.exception("strategy loop error: {}", e)
             await asyncio.sleep(3.0)

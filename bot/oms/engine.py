@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import random
 import time
+from decimal import Decimal  # 価格のズレをbpsで計算するために使用
 from typing import Any, cast
 
 from loguru import logger
@@ -44,6 +45,9 @@ class OmsEngine:
         # WS ライブネスのメモとブロックしきい値（デフォルト値は安全側）
         self._ws_private_last_ms: int = 0
         self._ws_stale_block_ms: int = 10_000
+        # PostOnly追従（アメンド）の頻度制御メモ
+        self._last_amend_ms: dict[str, int] = {}
+        self._amend_count_minute: dict[str, tuple[int, int]] = {}
         self._last_event_ms: dict[str, int] = (
             {}
         )  # 注文ごとの最終更新時刻（ms）を覚えて、古いWSイベントを無視するためのメモ
@@ -356,6 +360,95 @@ class OmsEngine:
                     cid = getattr(o, "client_order_id", None) or getattr(o, "client_id", None)
                 if cid:
                     self._inflight_client_ids.add(str(cid))
+
+    async def maintain_postonly_orders(self, symbols: list[str], strat_cfg) -> None:
+        """PostOnlyの未約定指値をBBOにあわせて安全に少しだけ寄せる。
+        - BBOはExchangeのget_bbo（WSキャッシュ優先）を利用
+        - ズレが小さい時は何もしない（chase_min_reprice_bps）
+        - 連続修正の最短間隔＆1分あたりの回数上限でやりすぎ防止
+        - 実際の非クロス補正・tick丸め・価格逸脱ガードはExchange側で安全に実行
+        """
+
+        if not getattr(strat_cfg, "chase_enabled", False):
+            return
+
+        thr_bps = Decimal(str(getattr(strat_cfg, "chase_min_reprice_bps", 2)))
+        interval_ms = int(getattr(strat_cfg, "chase_interval_ms", 1500))
+        max_per_min = int(getattr(strat_cfg, "chase_max_amends_per_min", 12))
+
+        get_bbo = getattr(self._ex, "get_bbo", None)
+        if not callable(get_bbo):
+            return
+
+        now_ms = int(utc_now().timestamp() * 1000)
+
+        for sym in symbols:
+            try:
+                open_orders = await self._ex.get_open_orders(sym)
+            except Exception:
+                open_orders = []
+
+            for o in open_orders or []:
+                if not isinstance(o, dict):
+                    continue
+                tif = (str(o.get("timeInForce") or "")).lower()
+                otype = (str(o.get("orderType") or "")).lower()
+                status = (str(o.get("orderStatus") or o.get("status") or "")).upper()
+                if (otype != "limit") or (tif != "postonly"):
+                    continue
+                if status in {"FILLED", "CANCELED", "CANCELLED", "REJECTED"}:
+                    continue
+
+                side = str(o.get("side") or "")
+                price_str = o.get("price")
+                if not price_str or not side:
+                    continue
+
+                bid, ask = await get_bbo(sym)
+                if not bid or not ask:
+                    continue
+                try:
+                    mid = (Decimal(str(bid)) + Decimal(str(ask))) / Decimal("2")
+                except Exception:
+                    continue
+                if mid <= 0:
+                    continue
+
+                try:
+                    px = Decimal(str(price_str))
+                    bps = (abs(px - mid) / mid) * Decimal("10000")
+                except Exception:
+                    continue
+                if bps < thr_bps:
+                    continue
+
+                eid = o.get("orderLinkId") or o.get("orderId") or f"{sym}:{side}:{price_str}"
+                last = self._last_amend_ms.get(eid, 0)
+                if (now_ms - last) < interval_ms:
+                    continue
+                minute = now_ms // 60000
+                rec = self._amend_count_minute.get(eid)
+                if rec and rec[0] == minute and rec[1] >= max_per_min:
+                    continue
+
+                desired = ask if side.upper() == "BUY" else bid
+
+                try:
+                    await self._ex.amend_order(
+                        symbol=sym,
+                        order_id=o.get("orderId"),
+                        client_order_id=o.get("orderLinkId"),
+                        new_price=desired,
+                        side=side,
+                        post_only=True,
+                    )
+                    self._last_amend_ms[eid] = now_ms
+                    if rec and rec[0] == minute:
+                        self._amend_count_minute[eid] = (minute, rec[1] + 1)
+                    else:
+                        self._amend_count_minute[eid] = (minute, 1)
+                except Exception:
+                    continue
 
     # ---------- タイムアウト監視 ----------
 

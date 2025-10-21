@@ -112,6 +112,8 @@ async def _run(config_path: str | None) -> None:
                         spot_price=spot_price,
                         perp_price=perp_price,
                     )
+                # Paperでも挙動を合わせて追従の検証を行う（実処理はExchange側に委譲）
+                await oms.maintain_postonly_orders(cfg.strategy.symbols, cfg.strategy)
             except Exception as e:  # noqa: BLE001
                 logger.exception("strategy step error: {}", e)
             await asyncio.sleep(3.0)
