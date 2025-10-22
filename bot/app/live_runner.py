@@ -537,11 +537,14 @@ async def _main_async(
         pass
     finally:
         if flatten_on_exit:
-            logger.warning("on-exit: flatten_all()")
             try:
-                await strategy.flatten_all()
-            except Exception as e:  # noqa: BLE001
-                logger.exception("flatten_all on exit failed: {}", e)
+                oms._log.info("shutdown.begin flatten_on_exit=true")  # 構造化ログ（STEP38）
+            except Exception:
+                pass
+            try:
+                await oms.drain_and_flatten(cfg.strategy.symbols, strategy, timeout_s=20)  # 安全ドレインを実施
+            except Exception:
+                pass
 
 
 def main() -> None:

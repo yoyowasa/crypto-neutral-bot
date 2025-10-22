@@ -1,6 +1,7 @@
 # これは「注文のライフサイクルを安全に管理するOMSエンジン」を実装するファイルです。
 from __future__ import annotations
 
+import asyncio  # ドレイン中に小さく待つためのスリープで使う
 import logging  # 構造化ログ（運用監査）用にloggerを使う
 import random
 import time
@@ -379,6 +380,74 @@ class OmsEngine:
                 self._note_rejection(str(sym))
         except Exception:
             pass
+
+    async def drain_and_flatten(self, symbols: list[str], strategy, timeout_s: int = 20) -> None:
+        """安全終了用のドレイン関数。
+        1) 新規発注を止める → 2) 未完了注文を取り消す → 3) 戦略の全クローズを試みる、を
+        タイムアウトまで数回ゆるく繰り返す（例外は飲み込んで継続）。"""
+        try:
+            self._disable_new_orders = True
+            rm = getattr(strategy, "_risk_manager", None)
+            if rm is not None:
+                rm.disable_new_orders = True
+        except Exception:
+            pass
+
+        start_ms = int(utc_now().timestamp() * 1000)
+        deadline_ms = start_ms + timeout_s * 1000
+        self._log.info("shutdown.drain start timeout_s=%d", timeout_s)
+
+        total_canceled = 0
+        loops = 0
+
+        while True:
+            loops += 1
+            any_open = False
+            loop_canceled = 0
+
+            for sym in symbols:
+                try:
+                    open_orders = await self._ex.get_open_orders(sym)
+                except Exception:
+                    open_orders = []
+                if open_orders:
+                    any_open = True
+                for o in open_orders:
+                    order_id = o.get("orderId") if isinstance(o, dict) else getattr(o, "order_id", None)
+                    client_oid = o.get("orderLinkId") if isinstance(o, dict) else getattr(o, "client_order_id", None)
+                    try:
+                        try:
+                            await self._ex.cancel_order(symbol=sym, order_id=order_id, client_order_id=client_oid)
+                        except TypeError:
+                            await cast(Any, self._ex).cancel_order(order_id=order_id, client_id=client_oid)
+                        loop_canceled += 1
+                    except Exception:
+                        continue
+
+            try:
+                await strategy.flatten_all()
+            except Exception:
+                pass
+
+            now_ms = int(utc_now().timestamp() * 1000)
+            total_canceled += loop_canceled
+            try:
+                self._log.info("shutdown.drain loop canceled=%d any_open=%s", loop_canceled, str(any_open))
+            except Exception:
+                pass
+
+            if (not any_open) or (now_ms >= deadline_ms):
+                break
+
+            await asyncio.sleep(0.5)
+
+        elapsed_ms = int(utc_now().timestamp() * 1000) - start_ms
+        self._log.info(
+            "shutdown.drain done canceled_total=%d loops=%d elapsed_ms=%d",
+            total_canceled,
+            loops,
+            elapsed_ms,
+        )
 
     async def reconcile_inflight_open_orders(self, symbols: list[str]) -> None:
         """取引所に残る open 注文の client_order_id を復元して二重発注を防ぐ。
