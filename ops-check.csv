@@ -1,0 +1,3 @@
+ts,symbol,funding_predicted,next_funding_time,bbo_bid,bbo_ask,auth,open_orders,decision,predicted_apr,reason,taker_fee_bps_roundtrip,estimated_slippage_bps,min_expected_apr
+2025-10-21T22:50:30.819089+00:00,BTCUSDT,4.583e-05,2025-10-22 00:00:00+00:00,109104.50,109104.60,True,0,SKIP,0.05018385,期待収益がコスト未満,6.0,5.0,0.05
+2025-10-21T22:50:32.392804+00:00,ETHUSDT,3.69e-06,2025-10-22 00:00:00+00:00,3909.68,3909.69,True,0,SKIP,0.0040405499999999995,APRが閾値未満,6.0,5.0,0.05

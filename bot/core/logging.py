@@ -1,6 +1,7 @@
 # これは「読みやすいログとJSONログを回転ファイルで出力する」設定を行うファイルです。
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from loguru import logger
@@ -55,6 +56,15 @@ def setup_logging(
         backtrace=True,
         diagnose=False,
         serialize=True,  # ← JSON出力
+    )
+
+    # Console sink (stdout)
+    logger.add(
+        sys.stdout,
+        level=normalized_level,
+        backtrace=True,
+        diagnose=False,
+        format=human_format,
     )
 
     logger.info("logging initialized: level={}, dir={}", normalized_level, log_dir)

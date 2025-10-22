@@ -52,6 +52,8 @@ class RiskManager:
         hedge_delay_p95_threshold_sec: float = 2.0,
         api_error_max_in_60s: int = 10,
         flatten_all: Callable[[], Awaitable[None]],
+        funding_flip_min_abs: float = 0.0,
+        funding_flip_consecutive: int = 1,
     ) -> None:
         """これは何をする関数？
         → しきい値と、発火時に実際に全クローズする flatten_all コールバックを受け取ります。
@@ -70,6 +72,11 @@ class RiskManager:
 
         # ヘッジ遅延分布（最近N件）
         self._hedge_latencies_sec: deque[float] = deque(maxlen=200)
+
+        # Funding sign-flip hysteresis
+        self._funding_flip_min_abs: float = float(funding_flip_min_abs)
+        self._funding_flip_consecutive: int = int(funding_flip_consecutive)
+        self._funding_flip_counts: dict[str, int] = {}
 
         # APIエラー監視
         self._api_errors = _ApiErrorWindow(max_in_window=api_error_max_in_60s, window_sec=60.0)
@@ -115,8 +122,22 @@ class RiskManager:
         """
         prev = self._last_funding_predicted.get(symbol)
         self._last_funding_predicted[symbol] = predicted_rate
-        if prev is not None and (prev * predicted_rate) < 0:
-            asyncio.create_task(self._trigger_kill(f"funding sign flip {symbol}: {prev} -> {predicted_rate}"))
+        # 初回は比較対象なし
+        if prev is None:
+            self._funding_flip_counts.pop(symbol, None)
+            return
+        # 微小ノイズ無視（両方の絶対値が閾値未満）
+        if abs(prev) < self._funding_flip_min_abs and abs(predicted_rate) < self._funding_flip_min_abs:
+            self._funding_flip_counts.pop(symbol, None)
+            return
+        if (prev * predicted_rate) < 0:
+            cnt = self._funding_flip_counts.get(symbol, 0) + 1
+            self._funding_flip_counts[symbol] = cnt
+            if cnt >= max(1, self._funding_flip_consecutive):
+                self._funding_flip_counts[symbol] = 0
+                asyncio.create_task(self._trigger_kill(f"funding sign flip {symbol}: {prev} -> {predicted_rate}"))
+        else:
+            self._funding_flip_counts.pop(symbol, None)
 
     # ---------- 内部：キルスイッチ ----------
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 # --env で環境切替、--dry-run で PaperExchange を使い実発注せずに全経路を通します。
 import argparse
 import asyncio
+import logging  # ops-check の結果をログに出すために使う
 from typing import Any
 
 from loguru import logger
@@ -249,20 +250,13 @@ async def _strategy_step_once(
 
 
 async def _main_async(
-    env: str,
-    cfg_path: str | None,
-    dry_run: bool,
-    flatten_on_exit: bool,
-    ops_check: bool = False,
-    log_level: str = "INFO",
-    ops_out_csv: str | None = None,
-    ops_out_json: str | None = None,
+    env: str, cfg_path: str | None, dry_run: bool, flatten_on_exit: bool, ops_check: bool = False
 ) -> None:
     """これは何をする関数？
     → 設定・ログ・DB を初期化し、dry-run/実発注のいずれかで戦略を起動します。
     """
 
-    setup_logging(level=log_level)
+    setup_logging(level="INFO")
     cfg = load_config(cfg_path)
 
     # 本番(mainnet)でallow_live=Falseなら、ここで止める（誤起動防止の安全弁）
@@ -296,118 +290,23 @@ async def _main_async(
     # 健診モード：各シンボルの Funding / BBO / 認証REST（open orders）を点検して終了する
     if ops_check:
         syms = list(getattr(cfg.strategy, "symbols", []))
-        # Use already imported classes; keep local stdlib imports only
-        import csv
-        import json
-        import os
-        from datetime import datetime, timezone
-
-        repo_ops = Repo(db_url=cfg.db_url)
-        await repo_ops.create_all()
-        oms_ops = OmsEngine(ex=data_ex, repo=repo_ops, cfg=None)
-        flip_min = float(os.environ.get("RISK__FUNDING_FLIP_MIN_ABS", "0") or 0)
-        flip_n = int(os.environ.get("RISK__FUNDING_FLIP_CONSECUTIVE", "1") or 1)
-        rm_ops = RiskManager(
-            loss_cut_daily_jpy=cfg.risk.loss_cut_daily_jpy,
-            ws_disconnect_threshold_sec=30.0,
-            hedge_delay_p95_threshold_sec=2.0,
-            api_error_max_in_60s=10,
-            flatten_all=lambda: asyncio.sleep(0),
-            funding_flip_min_abs=flip_min,
-            funding_flip_consecutive=flip_n,
-        )
-        taker_bps = float(os.environ.get("STRATEGY__TAKER_FEE_BPS_ROUNDTRIP", "6.0") or 6.0)
-        slip_bps = float(os.environ.get("STRATEGY__ESTIMATED_SLIPPAGE_BPS", "5.0") or 5.0)
-        strat_ops = FundingBasisStrategy(
-            oms=oms_ops,
-            risk_config=cfg.risk,
-            strategy_config=cfg.strategy,
-            period_seconds=8.0 * 3600.0,
-            taker_fee_bps_roundtrip=taker_bps,
-            estimated_slippage_bps=slip_bps,
-            risk_manager=rm_ops,
-        )
-
-        rows: list[dict] = []
         for sym in syms:
             fi = await data_ex.get_funding_info(sym)
             bid, ask = await data_ex.get_bbo(sym)
-            # Private auth check
-            auth_ok = True
             try:
                 oo = await data_ex.get_open_orders(sym)
-                open_n = len(oo)
             except Exception:
-                auth_ok = False
-                open_n = 0
-            logger.info(
-                "ops.check symbol={} funding={} next={} bbo=({}, {}) open={}",
+                oo = []
+            logging.info(
+                "ops.check symbol=%s funding=%s next=%s bbo=(%s,%s) open=%d",
                 sym,
                 getattr(fi, "predicted_rate", None),
                 getattr(fi, "next_funding_time", None),
                 bid,
                 ask,
-                open_n,
-            )
-            # Decision preview
-            try:
-                d = strat_ops.evaluate(
-                    funding=fi,
-                    spot_price=await data_ex.get_ticker(f"{sym}_SPOT"),
-                    perp_price=await data_ex.get_ticker(sym),
-                )
-                action = getattr(getattr(d, "action", None), "name", str(getattr(d, "action", "")))
-                reason = getattr(d, "reason", None)
-                apr = getattr(d, "predicted_apr", None)
-            except Exception as e:
-                action, reason, apr = ("ERR", str(e), None)
-            logger.info(
-                "ops.health sym={} auth={} decision={} apr={} reason={}",
-                sym,
-                "OK" if auth_ok else "NG",
-                action,
-                apr,
-                reason,
-            )
-            rows.append(
-                {
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "symbol": sym,
-                    "funding_predicted": getattr(fi, "predicted_rate", None),
-                    "next_funding_time": str(getattr(fi, "next_funding_time", None)),
-                    "bbo_bid": bid,
-                    "bbo_ask": ask,
-                    "auth": bool(auth_ok),
-                    "open_orders": int(open_n),
-                    "decision": action,
-                    "predicted_apr": float(apr) if apr is not None else None,
-                    "reason": reason,
-                    "taker_fee_bps_roundtrip": taker_bps,
-                    "estimated_slippage_bps": slip_bps,
-                    "min_expected_apr": getattr(cfg.strategy, "min_expected_apr", None),
-                }
+                len(oo),
             )
         await data_ex.close()
-        # Optional export
-        if ops_out_csv:
-            try:
-                fieldnames = list(rows[0].keys()) if rows else []
-                with open(ops_out_csv, "w", newline="", encoding="utf-8") as f:
-                    w = csv.DictWriter(f, fieldnames=fieldnames)
-                    if fieldnames:
-                        w.writeheader()
-                    for r in rows:
-                        w.writerow(r)
-                logger.info("ops.export csv={} rows={}", ops_out_csv, len(rows))
-            except Exception as e:
-                logger.warning("ops.export csv failed: {}", e)
-        if ops_out_json:
-            try:
-                with open(ops_out_json, "w", encoding="utf-8") as f:
-                    json.dump(rows, f, ensure_ascii=False, indent=2)
-                logger.info("ops.export json={} rows={}", ops_out_json, len(rows))
-            except Exception as e:
-                logger.warning("ops.export json failed: {}", e)
         return
 
     # 発注先（dry-run は PaperExchange、live は BybitGateway）
@@ -452,30 +351,20 @@ async def _main_async(
         if s:
             await s.flatten_all()
 
-    import os
-
-    _flip_min = float(os.environ.get("RISK__FUNDING_FLIP_MIN_ABS", "0") or 0)
-    _flip_n = int(os.environ.get("RISK__FUNDING_FLIP_CONSECUTIVE", "1") or 1)
     rm = RiskManager(
         loss_cut_daily_jpy=cfg.risk.loss_cut_daily_jpy,
         ws_disconnect_threshold_sec=30.0,
         hedge_delay_p95_threshold_sec=2.0,
         api_error_max_in_60s=10,
         flatten_all=_flatten_all,
-        funding_flip_min_abs=_flip_min,
-        funding_flip_consecutive=_flip_n,
     )
 
     # Strategy
-    taker_bps = float(os.environ.get("STRATEGY__TAKER_FEE_BPS_ROUNDTRIP", "6.0") or 6.0)
-    slip_bps = float(os.environ.get("STRATEGY__ESTIMATED_SLIPPAGE_BPS", "5.0") or 5.0)
     strategy = FundingBasisStrategy(
         oms=oms,
         risk_config=cfg.risk,
         strategy_config=cfg.strategy,
         period_seconds=8.0 * 3600.0,
-        taker_fee_bps_roundtrip=taker_bps,
-        estimated_slippage_bps=slip_bps,
         risk_manager=rm,
     )
     strategy_holder["strategy"] = strategy
@@ -556,9 +445,6 @@ def main() -> None:
     parser.add_argument("--config", type=str, default=None, help="path to config/app.yaml (loader reads by default)")
     parser.add_argument("--dry-run", action="store_true", help="use PaperExchange (no real orders)")
     parser.add_argument("--flatten-on-exit", action="store_true", help="flatten all positions on shutdown")
-    parser.add_argument("--log-level", type=str, default="INFO", help="logging level (e.g. DEBUG, INFO, WARNING)")
-    parser.add_argument("--ops-out-csv", type=str, default=None, help="write ops-check summary to CSV path")
-    parser.add_argument("--ops-out-json", type=str, default=None, help="write ops-check summary to JSON path")
     parser.add_argument(
         "--ops-check",
         action="store_true",
@@ -574,9 +460,6 @@ def main() -> None:
                 dry_run=bool(args.dry_run),
                 flatten_on_exit=bool(args.flatten_on_exit),
                 ops_check=bool(getattr(args, "ops_check", False)),
-                log_level=str(getattr(args, "log_level", "INFO")),
-                ops_out_csv=getattr(args, "ops_out_csv", None),
-                ops_out_json=getattr(args, "ops_out_json", None),
             )
         )
     except KeyboardInterrupt:
@@ -585,3 +468,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

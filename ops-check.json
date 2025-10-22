@@ -1,0 +1,34 @@
+[
+  {
+    "ts": "2025-10-21T22:50:30.819089+00:00",
+    "symbol": "BTCUSDT",
+    "funding_predicted": 4.583e-05,
+    "next_funding_time": "2025-10-22 00:00:00+00:00",
+    "bbo_bid": "109104.50",
+    "bbo_ask": "109104.60",
+    "auth": true,
+    "open_orders": 0,
+    "decision": "SKIP",
+    "predicted_apr": 0.05018385,
+    "reason": "期待収益がコスト未満",
+    "taker_fee_bps_roundtrip": 6.0,
+    "estimated_slippage_bps": 5.0,
+    "min_expected_apr": 0.05
+  },
+  {
+    "ts": "2025-10-21T22:50:32.392804+00:00",
+    "symbol": "ETHUSDT",
+    "funding_predicted": 3.69e-06,
+    "next_funding_time": "2025-10-22 00:00:00+00:00",
+    "bbo_bid": "3909.68",
+    "bbo_ask": "3909.69",
+    "auth": true,
+    "open_orders": 0,
+    "decision": "SKIP",
+    "predicted_apr": 0.0040405499999999995,
+    "reason": "APRが閾値未満",
+    "taker_fee_bps_roundtrip": 6.0,
+    "estimated_slippage_bps": 5.0,
+    "min_expected_apr": 0.05
+  }
+]
