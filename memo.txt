@@ -151,3 +151,5 @@ Live（Mainnet）
 .\scripts\start_mainnet.ps1
 健診のみ: 
 .\scripts\start_mainnet.ps1 --ops-check
+
+taskkill /IM python.exe /F
