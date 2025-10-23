@@ -22,6 +22,7 @@ from bot.core.time import (
 from bot.data.repo import Repo
 from bot.exchanges.base import ExchangeGateway
 from bot.exchanges.types import Order, OrderRequest
+from bot.tools.jsonl_sink import append_jsonl
 
 from .types import ManagedOrder, OmsConfig, OrderLifecycleState
 
@@ -57,6 +58,8 @@ class OmsEngine:
         # PostOnly追従（アメンド）の頻度制御メモ
         self._last_amend_ms: dict[str, int] = {}
         self._amend_count_minute: dict[str, tuple[int, int]] = {}
+        self._orders_jsonl: str = "logs/orders.jsonl"
+        self._trades_jsonl: str = "logs/trades.jsonl"
         # ===== メトリクス（集計用） =====
         self._metrics_chase_amend_total: dict[str, int] = {}
         self._metrics_cooldown_enter_total: dict[str, int] = {}
@@ -160,6 +163,24 @@ class OmsEngine:
             exchange_order_id=created.order_id,
             client_id=req.client_id,
         )
+        try:
+            append_jsonl(
+                self._orders_jsonl,
+                {
+                    "event": "order_new",
+                    "ts": utc_now().isoformat(),
+                    "symbol": req.symbol,
+                    "side": req.side,
+                    "type": req.type,
+                    "qty": req.qty,
+                    "price": req.price,
+                    "status": "new",
+                    "exchange_order_id": created.order_id,
+                    "client_id": req.client_id,
+                },
+            )
+        except Exception:
+            pass
         return created
 
     async def cancel(self, order_id: str | None = None, client_id: str | None = None) -> None:
@@ -204,6 +225,24 @@ class OmsEngine:
             exchange_order_id=exchange_order_id,
             client_id=cid,
         )
+        try:
+            append_jsonl(
+                self._orders_jsonl,
+                {
+                    "event": "order_canceled",
+                    "ts": utc_now().isoformat(),
+                    "symbol": managed.req.symbol if managed else "",
+                    "side": managed.req.side if managed else "",
+                    "type": managed.req.type if managed else "",
+                    "qty": managed.req.qty if managed else 0.0,
+                    "price": managed.req.price if managed else None,
+                    "status": "canceled",
+                    "exchange_order_id": exchange_order_id,
+                    "client_id": cid,
+                },
+            )
+        except Exception:
+            pass
 
     async def submit_hedge(self, symbol: str, delta_to_neutral: float) -> None:
         """これは何をする関数？
@@ -324,6 +363,25 @@ class OmsEngine:
                 exchange_order_id=managed.order_id or "",
                 client_id=cid,
             )
+            try:
+                ts_raw = event.get("updated_at") if isinstance(event, dict) else getattr(event, "updated_at", None)
+                ts_iso = parse_exchange_ts(ts_raw).isoformat() if ts_raw not in (None, "") else utc_now().isoformat()
+                append_jsonl(
+                    self._trades_jsonl,
+                    {
+                        "event": "trade_fill",
+                        "ts": ts_iso,
+                        "symbol": managed.req.symbol,
+                        "side": managed.req.side,
+                        "qty": last_filled,
+                        "price": float(price_val) if price_val is not None else 0.0,
+                        "fee": 0.0,
+                        "exchange_order_id": managed.order_id or "",
+                        "client_id": cid,
+                    },
+                )
+            except Exception:
+                pass
 
         remaining = managed.req.qty - managed.filled_qty
         if managed.state == OrderLifecycleState.PARTIALLY_FILLED and remaining > 1e-12:

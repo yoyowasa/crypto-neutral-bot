@@ -51,5 +51,6 @@ strategy:
   hold_across_events: true
   rebalance_band_bps: 5.0
 
+# DB を使わない場合は "none" とすると永続化を無効化
 db_url: "sqlite+aiosqlite:///./db/trading.db"
 timezone: "UTC"
