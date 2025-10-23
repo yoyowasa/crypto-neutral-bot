@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from loguru import logger
 
+from bot.analytics.trip_aggregator import RoundTripAggregator
 from bot.core.errors import (
     ExchangeError,
     RiskBreach,  # 二重発注を止めるための制御用エラー（リスク違反として扱う）
@@ -60,6 +61,8 @@ class OmsEngine:
         self._amend_count_minute: dict[str, tuple[int, int]] = {}
         self._orders_jsonl: str = "logs/orders.jsonl"
         self._trades_jsonl: str = "logs/trades.jsonl"
+        self._round_trips_jsonl: str = "logs/round_trips.jsonl"
+        self._trip_agg: RoundTripAggregator = RoundTripAggregator(self._round_trips_jsonl)
         # ===== メトリクス（集計用） =====
         self._metrics_chase_amend_total: dict[str, int] = {}
         self._metrics_cooldown_enter_total: dict[str, int] = {}
@@ -380,6 +383,20 @@ class OmsEngine:
                         "client_id": cid,
                     },
                 )
+                # feed round-trip aggregator for entry/exit/PNL logging
+                try:
+                    self._trip_agg.on_fill(
+                        symbol=managed.req.symbol,
+                        side=managed.req.side,
+                        qty=float(last_filled),
+                        price=float(price_val) if price_val is not None else 0.0,
+                        fee=0.0,
+                        ts_iso=ts_iso,
+                        exchange_order_id=managed.order_id or "",
+                        client_id=cid,
+                    )
+                except Exception:
+                    pass
             except Exception:
                 pass
 
