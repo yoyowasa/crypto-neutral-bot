@@ -105,6 +105,10 @@ async def _handle_private_execution(msg: dict, oms: OmsEngine) -> None:
             "cum_filled_qty": float(row.get("cumExecQty") or 0),
             "avg_fill_price": float(row.get("execPrice") or row.get("price") or 0),
         }
+        event["symbol"] = row.get("symbol") or row.get("s")
+        event["side"] = row.get("side") or row.get("S")
+        event["fee"] = row.get("execFee") or row.get("commission")
+        event["fee_currency"] = row.get("feeCurrency") or row.get("commissionAsset")
         client_order_id = row.get("orderLinkId") or row.get("clOrdId") or row.get("clientOrderId") or None
         event["client_order_id"] = client_order_id
         event["updated_at"] = (

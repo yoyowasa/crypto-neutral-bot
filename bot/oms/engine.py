@@ -109,6 +109,8 @@ class OmsEngine:
         except Exception:
             pass
 
+        # --- 構造化トレードログ（fillsを1行で記録） ---
+
         coid = req.client_order_id or self._gen_client_id("bot")
         req.client_order_id = coid
         if coid in self._inflight_client_ids:
