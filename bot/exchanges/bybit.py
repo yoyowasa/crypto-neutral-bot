@@ -9,7 +9,7 @@ import logging  # 構造化ログ（運用監査）用にloggerを使う
 import time
 from contextlib import suppress  # これは何をするimport？→ close時の例外を握りつぶして穏当に終了する
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal  # 価格・数量を取引所ステップに正確丸めするために使う
 from hashlib import sha256
 from typing import Any, Awaitable, Callable
@@ -743,13 +743,13 @@ class BybitGateway(ExchangeGateway):
             else:
                 interval_minutes = interval_hours * 60
 
-            if (predicted_rate is None) and last:
-                lr = last.get("fundingRate")
-                if lr not in (None, ""):
-                    try:
-                        predicted_rate = float(lr)
-                    except Exception:
-                        predicted_rate = None
+        if (predicted_rate is None) and last:
+            lr = last.get("fundingRate")
+            if lr not in (None, ""):
+                try:
+                    predicted_rate = float(lr)
+                except Exception:
+                    predicted_rate = None
 
             if (next_dt is None) and last and interval_minutes:
                 ts_ms = last.get("fundingRateTimestamp")
@@ -758,6 +758,17 @@ class BybitGateway(ExchangeGateway):
                     next_dt = settled_dt + timedelta(minutes=interval_minutes)
                 except Exception:
                     next_dt = None
+
+        # --- 次回時刻の最終確定（APIが欠損/過去でも必ず“未来”のスロットへ） ---
+        final_interval_min = None
+        if interval_hours is not None:
+            final_interval_min = interval_hours * 60
+        elif "interval_minutes" in locals() and interval_minutes:
+            final_interval_min = interval_minutes
+        else:
+            final_interval_min = 480  # 取れない場合は8時間を既定に
+
+        next_dt = self._compute_next_funding_time(final_interval_min, next_dt)  # 未来の次回Funding時刻を確定
 
         if (predicted_rate is None) or (next_dt is None):
             raise DataError(f"Bybit funding info missing: symbol={symbol}, rate={predicted_rate}, next={next_dt}")
@@ -1041,6 +1052,34 @@ class BybitGateway(ExchangeGateway):
             return (str(bid) if bid is not None else None, str(ask) if ask is not None else None)
         except Exception:
             return (None, None)
+
+    def _compute_next_funding_time(self, interval_minutes: int | None, api_next: object | None):
+        """次回Funding時刻を安全に確定する関数。
+        1) APIのnextFundingTimeが「未来」ならそれを採用
+        2) 欠損や「過去」の場合は、UTCの00:00を起点に interval_minutes ごとのスロットへ切り上げ
+        """
+
+        now = utc_now()  # いまのUTC
+        # API値をdatetimeへ（ms/秒/ISO/naiveの揺れはparse_exchange_tsが吸収）
+        dt_api = None
+        if api_next not in (None, ""):
+            try:
+                dt_api = api_next if isinstance(api_next, datetime) else parse_exchange_ts(api_next)
+            except Exception:
+                dt_api = None
+
+        # 1) 未来のAPI値はそのまま使う
+        if dt_api and dt_api > now:
+            return dt_api
+
+        # 2) 欠損/過去ならスロット切り上げ（既定=480分=8h）
+        iv = int(interval_minutes or 480)
+        # その日のUTC 00:00 をアンカーに、iv分の倍数の“次の”スロットへ
+        anchor = datetime(now.year, now.month, now.day, 0, 0, 0, tzinfo=timezone.utc)
+        elapsed_s = (now - anchor).total_seconds()
+        slot_s = iv * 60
+        k = int(elapsed_s // slot_s) + 1  # “次の”スロット（境界ちょうどの時も次へ送る）
+        return anchor + timedelta(seconds=slot_s * k)
 
     async def _get_bbo_if_fresh(self, symbol: str) -> tuple[str | None, str | None]:
         """WSキャッシュのBBOが新しいときだけ返し、古いときはRESTのTickerで補う。"""
