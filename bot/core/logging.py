@@ -1,4 +1,3 @@
-# これは「読みやすいログとJSONログを回転ファイルで出力する」設定を行うファイルです。
 from __future__ import annotations
 
 import sys
@@ -14,16 +13,14 @@ def setup_logging(
     human_filename: str = "app.log",
     json_filename: str = "app.jsonl",
 ) -> None:
-    """これは何をする関数？
-    → ログ出力を初期化し、以下の2ハンドラを登録します。
-      1) 人向けの読みやすいファイルログ（logs/app.log）
-      2) JSON 構造化ログ（logs/app.jsonl）
-    どちらもファイルサイズでローテーションし、一定期間で保持します。
+    """Initialize logging files and console.
+
+    Adds two rotating file sinks under `log_dir`:
+      1) Human-readable: logs/app.log (rotated daily at UTC midnight)
+      2) JSON structured: logs/app.jsonl (rotated daily at UTC midnight)
     """
-    # 既存ハンドラをすべて外してから付け直す
     logger.remove()
 
-    # ログディレクトリを作る
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
@@ -34,28 +31,28 @@ def setup_logging(
         "<level>{level: <8}</level> | {name}:{function}:{line} | {message}"
     )
 
-    # 人向けの読みやすいログ（回転ファイル）
+    # Human-readable log (rotate daily at UTC midnight)
     logger.add(
         str(log_path / human_filename),
         level=normalized_level,
-        rotation="10 MB",  # ファイルサイズで回転
-        retention="14 days",  # 14日保持
-        enqueue=True,  # マルチスレッド/プロセスで安全
+        rotation="00:00",
+        retention="14 days",
+        enqueue=True,
         backtrace=True,
         diagnose=False,
         format=human_format,
     )
 
-    # JSON構造化ログ（1行1JSON）
+    # JSON structured log (rotate daily at UTC midnight)
     logger.add(
         str(log_path / json_filename),
         level=normalized_level,
-        rotation="50 MB",
+        rotation="00:00",
         retention="30 days",
         enqueue=True,
         backtrace=True,
         diagnose=False,
-        serialize=True,  # ← JSON出力
+        serialize=True,
     )
 
     # Console sink (stdout)

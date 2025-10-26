@@ -23,7 +23,7 @@ from bot.core.time import (
 from bot.data.repo import Repo
 from bot.exchanges.base import ExchangeGateway
 from bot.exchanges.types import Order, OrderRequest
-from bot.tools.jsonl_sink import append_jsonl
+from bot.tools.jsonl_sink import append_jsonl_daily
 
 from .types import ManagedOrder, OmsConfig, OrderLifecycleState
 
@@ -170,8 +170,9 @@ class OmsEngine:
                 client_id=req.client_id,
             )
         try:
-            append_jsonl(
-                self._orders_jsonl,
+            append_jsonl_daily(
+                "logs",
+                "orders",
                 {
                     "event": "order_new",
                     "ts": utc_now().isoformat(),
@@ -233,8 +234,9 @@ class OmsEngine:
                 client_id=cid,
             )
         try:
-            append_jsonl(
-                self._orders_jsonl,
+            append_jsonl_daily(
+                "logs",
+                "orders",
                 {
                     "event": "order_canceled",
                     "ts": utc_now().isoformat(),
@@ -374,8 +376,9 @@ class OmsEngine:
             try:
                 ts_raw = event.get("updated_at") if isinstance(event, dict) else getattr(event, "updated_at", None)
                 ts_iso = parse_exchange_ts(ts_raw).isoformat() if ts_raw not in (None, "") else utc_now().isoformat()
-                append_jsonl(
-                    self._trades_jsonl,
+                append_jsonl_daily(
+                    "logs",
+                    "trades",
                     {
                         "event": "trade_fill",
                         "ts": ts_iso,

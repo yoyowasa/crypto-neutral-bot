@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, Set
 
-from bot.core.time import parse_exchange_ts
+from bot.core.time import parse_exchange_ts, utc_now
 from bot.tools.jsonl_sink import append_jsonl
 
 
@@ -55,7 +56,9 @@ class RoundTripAggregator:
     """
 
     def __init__(self, out_jsonl_path: str) -> None:
-        self._out = out_jsonl_path
+        # Base path like logs/round_trips.jsonl; we will write daily files
+        # logs/round_trips-YYYY-MM-DD.jsonl
+        self._out_base = out_jsonl_path
         self._state: Dict[str, _RoundState] = {}
 
     def on_fill(
@@ -137,8 +140,16 @@ class RoundTripAggregator:
             net_pnl = gross_pnl - (s.fees_open + s.fees_close)
 
             try:
+                # compute daily path from exit or entry timestamp
+                try:
+                    dt = parse_exchange_ts(s.exit_ts_iso or s.entry_ts_iso)
+                except Exception:
+                    dt = utc_now()
+                date_tag = dt.date().isoformat()
+                base = Path(self._out_base)
+                out_path = base.parent / f"{base.stem}-{date_tag}.jsonl"
                 append_jsonl(
-                    self._out,
+                    out_path,
                     {
                         "event": "round_trip",
                         "symbol": symbol,
