@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio  # ドレイン中に小さく待つためのスリープで使う
 import logging  # 構造化ログ（運用監査）用にloggerを使う
+import os
 import random
 import time
 from decimal import Decimal  # 価格のズレをbpsで計算するために使用
@@ -27,6 +28,48 @@ from bot.tools.jsonl_sink import append_jsonl_daily
 
 from .types import ManagedOrder, OmsConfig, OrderLifecycleState
 
+_USD_EQUIV_QUOTES = {"USDT", "USDC", "USD"}
+
+
+def _guess_base_quote(symbol: str) -> tuple[str, str]:
+    """Best-effort split of symbols like BTCUSDT or ETHUSDC into (base, quote)."""
+
+    sym = symbol.replace("_SPOT", "").upper()
+    for quote in ("USDT", "USDC", "USDD", "USD", "BTC", "ETH"):
+        if sym.endswith(quote):
+            return sym[: -len(quote)], quote
+    mid = max(3, len(sym) // 2)
+    return sym[:mid], sym[mid:]
+
+
+def _fee_to_usdt(
+    *,
+    fee: object | None,
+    fee_currency: object | None,
+    symbol: str,
+    price: float,
+) -> float | None:
+    """Convert fee to USDT if possible using trade price."""
+
+    if fee in (None, "", 0, "0"):
+        return None
+    try:
+        fee_val = float(str(fee))
+    except Exception:
+        return None
+    cur = str(fee_currency or "").upper()
+    if not cur:
+        return None
+
+    base, quote = _guess_base_quote(symbol)
+    if cur in _USD_EQUIV_QUOTES:
+        return fee_val
+    if cur == quote:
+        return fee_val
+    if cur == base and price:
+        return fee_val * float(price)
+    return None
+
 
 class OmsEngine:
     """注文管理（状態機械）を提供するエンジン。
@@ -46,6 +89,8 @@ class OmsEngine:
         self._repo = repo
         self._cfg = cfg or OmsConfig()
         self._log = logging.getLogger(__name__)  # このOMSの監査ログ出力口
+        self._run_id = os.environ.get("RUN_ID")
+        self._strategy_name = os.environ.get("STRATEGY_NAME")
         self._orders: dict[str, ManagedOrder] = {}  # key: client_id
         # WS ライブネスのメモとブロックしきい値（デフォルト値は安全側）
         self._ws_private_last_ms: int = 0
@@ -404,6 +449,12 @@ class OmsEngine:
                 except Exception:
                     pass
                 px = float(price_val) if price_val is not None else 0.0
+                fee_usdt = _fee_to_usdt(
+                    fee=ev_fee,
+                    fee_currency=ev_fee_ccy,
+                    symbol=ev_symbol or managed.req.symbol,
+                    price=px,
+                )
                 slippage_bps = None
                 try:
                     if ev_side and px and (bbo_bid is not None or bbo_ask is not None):
@@ -428,6 +479,14 @@ class OmsEngine:
                 run_id = getattr(self, "_run_id", None)
                 strat_name = getattr(self, "_strategy_name", None)
 
+                def _to_float(val: object | None) -> float | None:
+                    if val in (None, ""):
+                        return None
+                    try:
+                        return float(str(val))
+                    except Exception:
+                        return None
+
                 rec = {
                     "event": "trade_fill",
                     "ts": ts_iso,
@@ -442,13 +501,19 @@ class OmsEngine:
                     "exec_id": ev_exec_id,
                     "fee": float(ev_fee) if ev_fee is not None else 0.0,
                     "fee_currency": ev_fee_ccy,
+                    "fee_usdt": fee_usdt,
                     "liquidity": ev_liq,
                     "exchange_order_id": managed.order_id or "",
                     "client_id": cid,
-                    "bbo_bid": bbo_bid,
-                    "bbo_ask": bbo_ask,
+                    "bbo_bid": _to_float(bbo_bid),
+                    "bbo_ask": _to_float(bbo_ask),
                     "slippage_bps": slippage_bps,
                     "order_flags": flags,
+                    "raw_order_flags": (
+                        event.get("raw_order_flags")
+                        if isinstance(event, dict)
+                        else getattr(event, "raw_order_flags", None)
+                    ),
                     "source": ev_source or "ws.execution",
                 }
                 if strat_name:

@@ -112,6 +112,20 @@ async def _handle_private_execution(msg: dict, oms: OmsEngine) -> None:
         event["fee_currency"] = row.get("feeCurrency") or row.get("commissionAsset")
         event["order_id"] = row.get("orderId")
         event["exec_id"] = row.get("execId") or row.get("execIdStr") or row.get("execID")
+        raw_flags: dict[str, object] = {}
+        if "timeInForce" in row and row.get("timeInForce") not in (None, ""):
+            raw_flags["time_in_force"] = row.get("timeInForce")
+        if "reduceOnly" in row and row.get("reduceOnly") is not None:
+            raw_flags["reduce_only"] = row.get("reduceOnly")
+        if "orderType" in row and row.get("orderType") not in (None, ""):
+            raw_flags["order_type"] = row.get("orderType")
+        if raw_flags:
+            event["raw_order_flags"] = raw_flags
+        if "isMaker" in row:
+            try:
+                event["liquidity"] = "MAKER" if bool(row.get("isMaker")) else "TAKER"
+            except Exception:
+                pass
         client_order_id = row.get("orderLinkId") or row.get("clOrdId") or row.get("clientOrderId") or None
         event["client_order_id"] = client_order_id
         event["updated_at"] = (

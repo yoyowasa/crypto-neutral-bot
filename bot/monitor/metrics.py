@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Iterable
 
 from loguru import logger
 
+from bot.core.time import parse_exchange_ts
 from bot.data.repo import Repo
 from bot.exchanges.base import ExchangeGateway
 from bot.exchanges.types import Balance, Position
@@ -166,9 +169,9 @@ class MetricsLogger:
         → 指定日（UTC）の Funding 実現PnL合計と、TradeLogの手数料合計を返します（MVP）。
         """
 
-        # 既存のRepo API（list_*）を利用してPython側で日付フィルタ（件数はMVP想定で少ない）
         if self._repo is None:
-            return 0.0, 0.0
+            return self._estimate_daily_pnl_from_logs(day)
+
         ff = await self._repo.list_funding_events()
         tt = await self._repo.list_trades()
 
@@ -179,3 +182,62 @@ class MetricsLogger:
         funding_sum = sum(f.realized_pnl for f in ff if _is_same_day(f.ts))
         fees_sum = sum(t.fee for t in tt if _is_same_day(t.ts))
         return float(funding_sum), float(fees_sum)
+
+    def _estimate_daily_pnl_from_logs(self, day: date) -> tuple[float, float]:
+        fees_sum = 0.0
+        day_start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
+        day_end = day_start + timedelta(days=1)
+        for rec in self._iter_jsonl_records(prefix="trades", day=day):
+            ts = self._parse_log_ts(rec)
+            if ts is None:
+                continue
+            ts_utc = ts.astimezone(timezone.utc)
+            if not (day_start <= ts_utc < day_end):
+                continue
+            fee_val = rec.get("fee_usdt")
+            if fee_val is None:
+                fee_val = rec.get("fee")
+            try:
+                fees_sum += float(fee_val or 0.0)
+            except Exception:
+                continue
+        return 0.0, float(fees_sum)
+
+    def _iter_jsonl_records(self, prefix: str, day: date):
+        log_path = Path("logs")
+        for dtag in self._candidate_jst_dates(day):
+            path = log_path / f"{prefix}-{dtag.isoformat()}.jsonl"
+            if not path.exists():
+                continue
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            yield json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+            except Exception:
+                continue
+
+    def _candidate_jst_dates(self, day: date) -> list[date]:
+        jst = timezone(timedelta(hours=9))
+        out: set[date] = set()
+        for offset in (-1, 0, 1):
+            dt = datetime.combine(day + timedelta(days=offset), datetime.min.time(), tzinfo=timezone.utc)
+            out.add(dt.astimezone(jst).date())
+        return sorted(out)
+
+    def _parse_log_ts(self, rec: dict) -> datetime | None:
+        ts_raw = rec.get("time_utc") or rec.get("ts")
+        if ts_raw in (None, ""):
+            return None
+        try:
+            return parse_exchange_ts(ts_raw)
+        except Exception:
+            try:
+                return datetime.fromisoformat(str(ts_raw))
+            except Exception:
+                return None
