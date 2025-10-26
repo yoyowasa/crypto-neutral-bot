@@ -375,22 +375,99 @@ class OmsEngine:
                 )
             try:
                 ts_raw = event.get("updated_at") if isinstance(event, dict) else getattr(event, "updated_at", None)
-                ts_iso = parse_exchange_ts(ts_raw).isoformat() if ts_raw not in (None, "") else utc_now().isoformat()
-                append_jsonl_daily(
-                    "logs",
-                    "trades",
-                    {
-                        "event": "trade_fill",
-                        "ts": ts_iso,
-                        "symbol": managed.req.symbol,
-                        "side": managed.req.side,
-                        "qty": last_filled,
-                        "price": float(price_val) if price_val is not None else 0.0,
-                        "fee": 0.0,
-                        "exchange_order_id": managed.order_id or "",
-                        "client_id": cid,
-                    },
+                ts_dt = parse_exchange_ts(ts_raw) if ts_raw not in (None, "") else utc_now()
+                ts_iso = ts_dt.astimezone().isoformat()
+
+                # enrich fields
+                ev_symbol = event.get("symbol") if isinstance(event, dict) else getattr(event, "symbol", None)
+                ev_side = event.get("side") if isinstance(event, dict) else getattr(event, "side", None)
+                ev_fee = event.get("fee") if isinstance(event, dict) else getattr(event, "fee", None)
+                ev_fee_ccy = (
+                    event.get("fee_currency") if isinstance(event, dict) else getattr(event, "fee_currency", None)
                 )
+                ev_order_id = event.get("order_id") if isinstance(event, dict) else getattr(event, "order_id", None)
+                ev_coid = (
+                    event.get("client_order_id") if isinstance(event, dict) else getattr(event, "client_order_id", None)
+                )
+                ev_exec_id = event.get("exec_id") if isinstance(event, dict) else getattr(event, "exec_id", None)
+                ev_liq = event.get("liquidity") if isinstance(event, dict) else getattr(event, "liquidity", None)
+                ev_source = event.get("source") if isinstance(event, dict) else getattr(event, "source", None)
+
+                # best bid/ask and slippage
+                bbo_bid = None
+                bbo_ask = None
+                try:
+                    if hasattr(self._ex, "_get_bbo_if_fresh"):
+                        bbo_bid, bbo_ask = await self._ex._get_bbo_if_fresh(managed.req.symbol)
+                    else:
+                        bbo_bid, bbo_ask = await cast(Any, self._ex).get_bbo(managed.req.symbol)
+                except Exception:
+                    pass
+                px = float(price_val) if price_val is not None else 0.0
+                slippage_bps = None
+                try:
+                    if ev_side and px and (bbo_bid is not None or bbo_ask is not None):
+                        if str(ev_side).lower() == "buy" and bbo_ask not in (None, ""):
+                            base = float(str(bbo_ask))
+                            slippage_bps = (px - base) / base * 1e4
+                        elif str(ev_side).lower() == "sell" and bbo_bid not in (None, ""):
+                            base = float(str(bbo_bid))
+                            slippage_bps = (base - px) / base * 1e4
+                except Exception:
+                    slippage_bps = None
+
+                # order flags
+                flags = {
+                    "post_only": bool(getattr(managed.req, "post_only", False)),
+                    "reduce_only": bool(getattr(managed.req, "reduce_only", False)),
+                    "time_in_force": getattr(managed.req, "time_in_force", None),
+                    "order_type": getattr(managed.req, "type", None),
+                }
+
+                # run context (optional via env)
+                run_id = getattr(self, "_run_id", None)
+                strat_name = getattr(self, "_strategy_name", None)
+
+                rec = {
+                    "event": "trade_fill",
+                    "ts": ts_iso,
+                    "time_utc": ts_dt.astimezone().isoformat(),
+                    "symbol": ev_symbol or managed.req.symbol,
+                    "side": ev_side or managed.req.side,
+                    "qty": last_filled,
+                    "price": px,
+                    "notional": round(last_filled * px, 12),
+                    "order_id": ev_order_id or (managed.order_id or ""),
+                    "client_order_id": ev_coid,
+                    "exec_id": ev_exec_id,
+                    "fee": float(ev_fee) if ev_fee is not None else 0.0,
+                    "fee_currency": ev_fee_ccy,
+                    "liquidity": ev_liq,
+                    "exchange_order_id": managed.order_id or "",
+                    "client_id": cid,
+                    "bbo_bid": bbo_bid,
+                    "bbo_ask": bbo_ask,
+                    "slippage_bps": slippage_bps,
+                    "order_flags": flags,
+                    "source": ev_source or "ws.execution",
+                }
+                if strat_name:
+                    rec["strategy_name"] = strat_name
+                if run_id:
+                    rec["run_id"] = run_id
+
+                # tag heuristic
+                try:
+                    if flags.get("reduce_only"):
+                        rec["tag"] = "CLOSE"
+                    elif str(cid).startswith("hedge-"):
+                        rec["tag"] = "HEDGE"
+                    else:
+                        rec["tag"] = "OPEN"
+                except Exception:
+                    pass
+
+                append_jsonl_daily("logs", "trades", rec)
                 # feed round-trip aggregator for entry/exit/PNL logging
                 try:
                     self._trip_agg.on_fill(
