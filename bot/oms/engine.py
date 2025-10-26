@@ -37,7 +37,7 @@ class OmsEngine:
     - process_timeouts(): タイムアウト監視（テストから明示呼び出し）
     """
 
-    def __init__(self, ex: ExchangeGateway, repo: Repo, cfg: OmsConfig | None = None) -> None:
+    def __init__(self, ex: ExchangeGateway, repo: Repo | None, cfg: OmsConfig | None = None) -> None:
         """これは何をする関数？
         → ExchangeGateway/Repo/設定を受け取り、注文追跡テーブルを用意します。
         """
@@ -158,16 +158,17 @@ class OmsEngine:
         )
         self._orders[req.client_id] = managed
 
-        await self._repo.add_order_log(
-            symbol=req.symbol,
-            side=req.side,
-            type=req.type,
-            qty=req.qty,
-            price=req.price,
-            status="new",
-            exchange_order_id=created.order_id,
-            client_id=req.client_id,
-        )
+        if self._repo is not None:
+            await self._repo.add_order_log(
+                symbol=req.symbol,
+                side=req.side,
+                type=req.type,
+                qty=req.qty,
+                price=req.price,
+                status="new",
+                exchange_order_id=created.order_id,
+                client_id=req.client_id,
+            )
         try:
             append_jsonl(
                 self._orders_jsonl,
@@ -220,16 +221,17 @@ class OmsEngine:
         if not exchange_order_id and managed and managed.order_id:
             exchange_order_id = managed.order_id
 
-        await self._repo.add_order_log(
-            symbol=managed.req.symbol if managed else "",
-            side=managed.req.side if managed else "",
-            type=managed.req.type if managed else "",
-            qty=managed.req.qty if managed else 0.0,
-            price=managed.req.price if managed else None,
-            status="canceled",
-            exchange_order_id=exchange_order_id,
-            client_id=cid,
-        )
+        if self._repo is not None:
+            await self._repo.add_order_log(
+                symbol=managed.req.symbol if managed else "",
+                side=managed.req.side if managed else "",
+                type=managed.req.type if managed else "",
+                qty=managed.req.qty if managed else 0.0,
+                price=managed.req.price if managed else None,
+                status="canceled",
+                exchange_order_id=exchange_order_id,
+                client_id=cid,
+            )
         try:
             append_jsonl(
                 self._orders_jsonl,
@@ -359,15 +361,16 @@ class OmsEngine:
             managed.state = OrderLifecycleState.REJECTED
 
         if last_filled > 0:
-            await self._repo.add_trade(
-                symbol=managed.req.symbol,
-                side=managed.req.side,
-                qty=last_filled,
-                price=float(price_val) if price_val is not None else 0.0,
-                fee=0.0,
-                exchange_order_id=managed.order_id or "",
-                client_id=cid,
-            )
+            if self._repo is not None:
+                await self._repo.add_trade(
+                    symbol=managed.req.symbol,
+                    side=managed.req.side,
+                    qty=last_filled,
+                    price=float(price_val) if price_val is not None else 0.0,
+                    fee=0.0,
+                    exchange_order_id=managed.order_id or "",
+                    client_id=cid,
+                )
             try:
                 ts_raw = event.get("updated_at") if isinstance(event, dict) else getattr(event, "updated_at", None)
                 ts_iso = parse_exchange_ts(ts_raw).isoformat() if ts_raw not in (None, "") else utc_now().isoformat()

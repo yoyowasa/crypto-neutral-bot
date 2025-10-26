@@ -282,9 +282,11 @@ async def _main_async(
     # CLIの --env を優先
     exchange_env = env or cfg.exchange.environment
 
-    # DB
-    repo = Repo(db_url=cfg.db_url)
-    await repo.create_all()
+    # DB (optional)
+    disable_db = str(getattr(cfg, "db_url", "") or "").lower() in {"", "disabled", "none"}
+    repo = None if disable_db else Repo(db_url=cfg.db_url)
+    if repo is not None:
+        await repo.create_all()
 
     # 実データ源（REST/WS）。dry-run でもデータ源として使用
     data_ex = BybitGateway(api_key=cfg.keys.api_key, api_secret=cfg.keys.api_secret, environment=exchange_env)
@@ -306,8 +308,9 @@ async def _main_async(
         import os
         from datetime import datetime, timezone
 
-        repo_ops = Repo(db_url=cfg.db_url)
-        await repo_ops.create_all()
+        repo_ops = None if disable_db else Repo(db_url=cfg.db_url)
+        if repo_ops is not None:
+            await repo_ops.create_all()
         oms_ops = OmsEngine(ex=data_ex, repo=repo_ops, cfg=None)
         flip_min = float(os.environ.get("RISK__FUNDING_FLIP_MIN_ABS", "0") or 0)
         flip_n = int(os.environ.get("RISK__FUNDING_FLIP_CONSECUTIVE", "1") or 1)
@@ -531,8 +534,9 @@ async def _main_async(
     tasks.append(asyncio.create_task(metrics.run_forever(interval_sec=30.0)))
 
     # 日次レポート（UTC 00:05 に前日分を作成）
-    reporter = ReportScheduler(repo=repo, out_dir="reports", hour_utc=0, minute_utc=5)
-    tasks.append(asyncio.create_task(reporter.run_forever()))
+    if repo is not None:
+        reporter = ReportScheduler(repo=repo, out_dir="reports", hour_utc=0, minute_utc=5)
+        tasks.append(asyncio.create_task(reporter.run_forever()))
 
     # 終了待ち
     try:

@@ -32,7 +32,7 @@ class MetricsLogger:
         self,
         *,
         ex: ExchangeGateway,
-        repo: Repo,
+        repo: Repo | None,
         symbols: list[str],
         risk: object | None = None,
         oms: object | None = None,
@@ -76,7 +76,10 @@ class MetricsLogger:
         today = datetime.now(timezone.utc).date()
 
         # 日次PnL概算（Fundingのみ＋手数料を引く簡易版）
-        funding_pnl, fees_sum = await self._estimate_daily_pnl(today)
+        if self._repo is None:
+            funding_pnl, fees_sum = (0.0, 0.0)
+        else:
+            funding_pnl, fees_sum = await self._estimate_daily_pnl(today)
         gross = funding_pnl
         net = gross - fees_sum
 
@@ -164,6 +167,8 @@ class MetricsLogger:
         """
 
         # 既存のRepo API（list_*）を利用してPython側で日付フィルタ（件数はMVP想定で少ない）
+        if self._repo is None:
+            return 0.0, 0.0
         ff = await self._repo.list_funding_events()
         tt = await self._repo.list_trades()
 
