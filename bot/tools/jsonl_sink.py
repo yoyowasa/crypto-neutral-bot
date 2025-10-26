@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +45,9 @@ def append_jsonl_daily(
             dt = parse_exchange_ts(when) if when not in (None, "") else utc_now()
         except Exception:
             dt = utc_now()
-        date_tag = dt.date().isoformat()
+        # Use Japan Standard Time (UTC+9) for daily file boundary
+        jst = timezone(timedelta(hours=9))
+        date_tag = dt.astimezone(jst).date().isoformat()
         p = Path(out_dir) / f"{prefix}-{date_tag}.jsonl"
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as f:

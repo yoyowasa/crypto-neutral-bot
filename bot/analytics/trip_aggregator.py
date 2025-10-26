@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Dict, Set
 
@@ -145,7 +146,9 @@ class RoundTripAggregator:
                     dt = parse_exchange_ts(s.exit_ts_iso or s.entry_ts_iso)
                 except Exception:
                     dt = utc_now()
-                date_tag = dt.date().isoformat()
+                # Daily boundary in Japan Standard Time (UTC+9)
+                jst = timezone(timedelta(hours=9))
+                date_tag = dt.astimezone(jst).date().isoformat()
                 base = Path(self._out_base)
                 out_path = base.parent / f"{base.stem}-{date_tag}.jsonl"
                 append_jsonl(
