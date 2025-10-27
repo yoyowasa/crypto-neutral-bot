@@ -271,6 +271,55 @@ class PaperExchange(ExchangeGateway):
                         except Exception:
                             pass
 
+                # Prime price-scale once using REST ticker (normalizes testnet scale)
+                try:
+                    data_gateway = getattr(self, "_data", None)
+                    price_scale = getattr(data_gateway, "_price_scale", {}) if data_gateway else {}
+                    needs_prime = False
+                    if isinstance(price_scale, dict):
+                        needs_prime = price_scale.get(symbol) in (None, 1.0)
+                    if needs_prime and data_gateway is not None and hasattr(data_gateway, "get_ticker"):
+                        # This call will both fetch a normalized price and internally set _price_scale
+                        await data_gateway.get_ticker(symbol)
+                except Exception:
+                    pass
+
+                # Apply scale to WS prices if available
+                try:
+                    data_gateway = getattr(self, "_data", None)
+                    scale = 1.0
+                    if data_gateway and hasattr(data_gateway, "_price_scale"):
+                        sc = getattr(data_gateway, "_price_scale", {}).get(symbol, 1.0)
+                        try:
+                            scale = float(sc)
+                        except Exception:
+                            scale = 1.0
+                    if bid is not None:
+                        bid = float(bid) * scale
+                    if ask is not None:
+                        ask = float(ask) * scale
+                except Exception:
+                    pass
+
+                # Apply Bybit price scale adjustment from gateway
+                scale = 1.0
+                data_gateway = getattr(self, "_data", None)
+                try:
+                    if data_gateway and hasattr(data_gateway, "_price_scale"):
+                        scale = getattr(data_gateway, "_price_scale", {}).get(symbol, 1.0)
+                    scale = float(scale)
+                except Exception:
+                    scale = 1.0
+                if bid is not None:
+                    try:
+                        bid = float(bid) * scale
+                    except Exception:
+                        pass
+                if ask is not None:
+                    try:
+                        ask = float(ask) * scale
+                    except Exception:
+                        pass
                 # BBOを更新（どちらか一方だけ得られた場合は既存値を維持）
                 async with self._lock:
                     if bid is not None or ask is not None:
@@ -288,6 +337,15 @@ class PaperExchange(ExchangeGateway):
             trades = msg.get("data") or []
             if trades:
                 price = float(trades[-1]["p"])
+                scale = 1.0
+                data_gateway = getattr(self, "_data", None)
+                try:
+                    if data_gateway and hasattr(data_gateway, "_price_scale"):
+                        scale = getattr(data_gateway, "_price_scale", {}).get(symbol, 1.0)
+                    scale = float(scale)
+                except Exception:
+                    scale = 1.0
+                price *= scale
                 async with self._lock:
                     self._last_price[symbol] = price
 

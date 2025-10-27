@@ -138,6 +138,7 @@ class BybitGateway(ExchangeGateway):
         self._bbo_cache: dict[str, dict] = (
             {}
         )  # 公開WS由来の最良気配(bid/ask/ts)をキャッシュしてPostOnly調整等で即時利用
+        self._price_scale: dict[str, float] = {}
         self._bbo_max_age_ms: int = 3000  # BBO freshness threshold (ms)
         self._price_dev_bps_limit: int | None = (
             50  # BBO中値からの最大乖離[bps]。Noneならガード無効（設定化は後続STEPで）
@@ -210,6 +211,25 @@ class BybitGateway(ExchangeGateway):
             "expired": "canceled",
         }
         return mapping.get(s, s)
+
+    @staticmethod
+    def _safe_float(value: object | None) -> float | None:
+        if value in (None, "", "0E-8"):
+            return None
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            try:
+                return float(str(value))
+            except Exception:
+                return None
+
+    def _apply_price_scale(self, symbol: str, value: object | None) -> float | None:
+        val = self._safe_float(value)
+        if val is None:
+            return None
+        scale = self._price_scale.get(symbol, 1.0)
+        return val * scale
 
     # ---------- REST 実装（CCXT） ----------
 
@@ -440,48 +460,76 @@ class BybitGateway(ExchangeGateway):
             raise ExchangeError(f"cancel_order failed: {e}") from e
 
     async def get_ticker(self, symbol: str) -> float:
-        """これは何をする関数？→ シンボルの近似価格（last or mark）を返す"""
+        """Bybitのティッカー価格を取得し、異常なスケールを補正する。"""
 
         try:
             ccxt_sym, _kind = self._to_ccxt_symbol(symbol)
-            t = await self._ccxt.fetch_ticker(ccxt_sym)
-            # last を優先、なければ bid/ask の中間、さらにだめなら mark
-            last = t.get("last")
-            if last is not None:
-                return float(last)
-            bid, ask = t.get("bid"), t.get("ask")
-            if bid is not None and ask is not None:
-                return (float(bid) + float(ask)) / 2.0
-            mark = t.get("info", {}).get("markPrice")
-            if mark is not None:
-                return float(mark)
-            raise ExchangeError(f"ticker has no price fields: {t}")
+            ticker = await self._ccxt.fetch_ticker(ccxt_sym)
+            return self._normalize_ticker_price(symbol, ticker)
         except Exception as e:  # noqa: BLE001
             msg = str(e).lower()
             if "api key" in msg or "authentication" in msg or "auth" in msg:
-                # Fallback to a public-only CCXT client for ticker
                 pub = ccxt.bybit({"enableRateLimit": True, "options": {"defaultType": "swap"}})
                 try:
                     if self._auth.testnet:
                         pub.set_sandbox_mode(True)
-                    t = await pub.fetch_ticker(ccxt_sym)
-                    last = t.get("last")
-                    if last is not None:
-                        return float(last)
-                    bid, ask = t.get("bid"), t.get("ask")
-                    if bid is not None and ask is not None:
-                        return (float(bid) + float(ask)) / 2.0
-                    mark = t.get("info", {}).get("markPrice")
-                    if mark is not None:
-                        return float(mark)
+                    ticker = await pub.fetch_ticker(ccxt_sym)
+                    return self._normalize_ticker_price(symbol, ticker)
                 except Exception:
                     pass
                 finally:
-                    try:
+                    with suppress(Exception):
                         await pub.close()
-                    except Exception:
-                        pass
             raise ExchangeError(f"get_ticker failed: {e}") from e
+
+    def _normalize_ticker_price(self, symbol: str, ticker: dict) -> float:
+        info = ticker.get("info") or {}
+        existing_scale = self._price_scale.get(symbol, 1.0)
+        raw_last = self._safe_float(ticker.get("last"))
+        index_price = self._safe_float(info.get("indexPrice"))
+        mark_price = self._safe_float(info.get("markPrice"))
+        raw_bid = self._safe_float(ticker.get("bid")) or self._safe_float(info.get("bid1Price"))
+        raw_ask = self._safe_float(ticker.get("ask")) or self._safe_float(info.get("ask1Price"))
+
+        scale = existing_scale
+        price = None
+
+        if raw_last is not None and index_price is not None and index_price > 0:
+            ratio = raw_last / index_price if index_price else None
+            if ratio is not None and (ratio >= 4.0 or ratio <= 0.25):
+                scale = index_price / raw_last if raw_last else 1.0
+                price = index_price
+            else:
+                scale = 1.0
+                price = raw_last
+        elif raw_last is not None:
+            price = raw_last * scale
+        elif index_price is not None:
+            scale = 1.0
+            price = index_price
+        elif mark_price is not None:
+            price = mark_price * scale
+
+        scaled_bid = raw_bid * scale if raw_bid is not None else None
+        scaled_ask = raw_ask * scale if raw_ask is not None else None
+
+        if price is None:
+            if scaled_bid is not None and scaled_ask is not None:
+                price = (scaled_bid + scaled_ask) / 2.0
+            elif scaled_bid is not None:
+                price = scaled_bid
+            elif scaled_ask is not None:
+                price = scaled_ask
+
+        if price is None:
+            raise ExchangeError(f"ticker has no price fields: {ticker}")
+
+        if abs(scale - 1.0) > 1e-9:
+            self._price_scale[symbol] = scale
+        else:
+            self._price_scale.pop(symbol, None)
+
+        return float(price)
 
     async def get_funding_info_old(self, symbol: str) -> FundingInfo:
         """これは何をする関数？
@@ -1028,7 +1076,9 @@ class BybitGateway(ExchangeGateway):
         self, symbol: str, bid: str | float | None, ask: str | float | None, ts: int | str | None = None
     ) -> None:
         """公開WSから届いた最良気配をキャッシュする（価格は文字列でも数値でもOK）。"""
-        self._bbo_cache[symbol] = {"bid": bid, "ask": ask, "ts": ts}
+        bid_val = self._apply_price_scale(symbol, bid)
+        ask_val = self._apply_price_scale(symbol, ask)
+        self._bbo_cache[symbol] = {"bid": bid_val, "ask": ask_val, "ts": ts}
 
     async def get_bbo(self, symbol: str) -> tuple[str | None, str | None]:
         """キャッシュ済みBBOを返し、無ければRESTのTickerで補う（bid, ask）。"""
@@ -1047,8 +1097,10 @@ class BybitGateway(ExchangeGateway):
             )  # BBOのRESTフォールバックも統一
             item = ((res or {}).get("result", {}) or {}).get("list", [])[:1]
             row = item[0] if item else {}
-            bid = row.get("bid1Price")
-            ask = row.get("ask1Price")
+            bid = self._apply_price_scale(symbol, row.get("bid1Price"))
+            ask = self._apply_price_scale(symbol, row.get("ask1Price"))
+            if bid is not None or ask is not None:
+                self._bbo_cache[symbol] = {"bid": bid, "ask": ask, "ts": row.get("ts")}
             return (str(bid) if bid is not None else None, str(ask) if ask is not None else None)
         except Exception:
             return (None, None)
@@ -1106,8 +1158,10 @@ class BybitGateway(ExchangeGateway):
             )  # 鮮度ガードのREST補完も共通
             item = ((res or {}).get("result", {}) or {}).get("list", [])[:1]
             row = item[0] if item else {}
-            bid = row.get("bid1Price")
-            ask = row.get("ask1Price")
+            bid = self._apply_price_scale(symbol, row.get("bid1Price"))
+            ask = self._apply_price_scale(symbol, row.get("ask1Price"))
+            if bid is not None or ask is not None:
+                self._bbo_cache[symbol] = {"bid": bid, "ask": ask, "ts": row.get("ts")}
             return (str(bid) if bid is not None else None, str(ask) if ask is not None else None)
         except Exception:
             return (None, None)
