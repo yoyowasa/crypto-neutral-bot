@@ -263,6 +263,13 @@ async def _strategy_step_once(
     """
 
     for sym in symbols:
+        # 初期スケール未確定時は評価/発注をスキップ（2回連続で正規化確認）
+        try:
+            if hasattr(funding_source, "is_price_scale_ready") and not funding_source.is_price_scale_ready(sym, 2):
+                logger.info("guard.skip: price scale not ready yet sym={}", sym)
+                continue
+        except Exception:
+            pass
         funding = await funding_source.get_funding_info(sym)
         perp_price = await price_source.get_ticker(sym)
         spot_price = await price_source.get_ticker(f"{sym}_SPOT")

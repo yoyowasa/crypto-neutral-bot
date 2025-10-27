@@ -279,7 +279,8 @@ class PaperExchange(ExchangeGateway):
                     if isinstance(price_scale, dict):
                         needs_prime = price_scale.get(symbol) in (None, 1.0)
                     if needs_prime and data_gateway is not None and hasattr(data_gateway, "get_ticker"):
-                        # This call will both fetch a normalized price and internally set _price_scale
+                        # Prime twice to satisfy readiness (two consecutive normalized reads)
+                        await data_gateway.get_ticker(symbol)
                         await data_gateway.get_ticker(symbol)
                 except Exception:
                     pass

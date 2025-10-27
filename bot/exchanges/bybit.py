@@ -140,6 +140,8 @@ class BybitGateway(ExchangeGateway):
         )  # 公開WS由来の最良気配(bid/ask/ts)をキャッシュしてPostOnly調整等で即時利用
         self._price_scale: dict[str, float] = {}
         self._bbo_max_age_ms: int = 3000  # BBO freshness threshold (ms)
+        self._scale_recent: dict[str, float] = {}
+        self._price_scale_ready_count: dict[str, int] = {}
         self._price_dev_bps_limit: int | None = (
             50  # BBO中値からの最大乖離[bps]。Noneならガード無効（設定化は後続STEPで）
         )
@@ -530,6 +532,14 @@ class BybitGateway(ExchangeGateway):
             self._price_scale.pop(symbol, None)
 
         return float(price)
+
+    def is_price_scale_ready(self, symbol: str, required: int = 2) -> bool:
+        """Return True if price scale appears stabilized (consecutive checks)."""
+        try:
+            cnt = getattr(self, "_price_scale_ready_count", {}).get(symbol, 0)
+            return cnt >= int(required)
+        except Exception:
+            return False
 
     async def get_funding_info_old(self, symbol: str) -> FundingInfo:
         """これは何をする関数？
