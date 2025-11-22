@@ -4,9 +4,34 @@ from __future__ import annotations
 # --env で環境切替、--dry-run で PaperExchange を使い実発注せずに全経路を通します。
 import argparse
 import asyncio
+import json  # 起動時に ops-check.json を読み、API鍵の事前チェック結果をログ出力するため（importはファイル冒頭に統一）
+import os
 from typing import Any
 
 from loguru import logger
+
+_DEBUG_PRIVATE_WS: bool = False  # Private WS �̃f�o�u���O���D�g���q�Ǘ�
+
+
+def _format_guard_context(_ldict: dict) -> dict:
+    """guard.skip用の文脈を安全に抽出して返す。"""
+
+    keys = (
+        "ready_count",
+        "ready_required",
+        "cooldown_until",
+        "next_ready_at",
+        "wait_ms",
+        "since_prime_ms",
+        "since_tick_ms",
+    )
+    ctx = {}
+    for key in keys:
+        value = _ldict.get(key)
+        if value is not None:
+            ctx[key] = value
+    return ctx
+
 
 from bot.config.loader import load_config
 from bot.core.errors import ConfigError  # 本番禁止のときは起動を止めるために使う
@@ -14,16 +39,27 @@ from bot.core.logging import setup_logging
 from bot.core.retry import retryable
 from bot.data.repo import Repo
 from bot.exchanges.base import ExchangeGateway
-from bot.exchanges.bybit import BybitGateway
+from bot.exchanges.bitget import BitgetGateway
 from bot.monitor.metrics import MetricsLogger
 from bot.monitor.report import ReportScheduler
 from bot.oms.engine import OmsEngine
 from bot.oms.fill_sim import PaperExchange
+from bot.ops.check import (
+    _cooldown_info_for_symbol,  # ops-check見える化: クールダウンの現在地
+    _get_bybit_gateway,  # ops-check見える化: Bybit GW取得
+    _is_bbo_valid,  # ops-check見える化: BBOの妥当性
+    _market_data_ready_for_ops,  # ops-check見える化: 市場データREADY/理由
+    _min_limits_for_symbol,
+    _price_state_for_symbol,  # ops-check見える化: 価格ガード状態
+    _qty_common_step,
+    _qty_steps_for_symbol,
+    _scale_ready_for_symbol,  # ops-check見える化: スケール準備状態
+)
 from bot.risk.guards import RiskManager
 from bot.strategy.funding_basis.engine import FundingBasisStrategy
 
 # Bybit v5 -> OMS ステータス正規化対応表
-STATUS_MAP_BYBIT_TO_OMS = {
+STATUS_MAP_EXCHANGE_TO_OMS = {
     "Created": "NEW",
     "New": "NEW",
     "PartiallyFilled": "PARTIAL",
@@ -43,11 +79,11 @@ def _status_map(s: str | None) -> str:
     """
 
     s = (s or "").lower()
-    if s in {"new", "created"}:
+    if s in {"new", "created", "init"}:
         return "new"
-    if s in {"partiallyfilled", "partialfilled", "partially_filled", "partial"}:
+    if s in {"partiallyfilled", "partialfilled", "partially_filled", "partial", "partial-fill"}:
         return "partially_filled"
-    if s in {"filled", "closed", "done"}:
+    if s in {"filled", "closed", "done", "full-fill"}:
         return "filled"
     if s in {"canceled", "cancelled", "expired"}:
         return "canceled"
@@ -62,6 +98,11 @@ async def _handle_private_order(msg: dict, oms: OmsEngine) -> None:
     """
 
     for row in msg.get("data", []):
+        if _DEBUG_PRIVATE_WS:
+            try:
+                logger.debug("order.ack.ws.raw: row={}", row)
+            except Exception:
+                pass
         event = {
             "client_id": row.get("orderLinkId") or row.get("clientOrderId") or row.get("orderId"),
             "status": _status_map(row.get("orderStatus") or row.get("status")),
@@ -71,7 +112,7 @@ async def _handle_private_order(msg: dict, oms: OmsEngine) -> None:
         }
         # --- ステータス正規化（Bybit -> OMS） ---
         status_raw = row.get("orderStatus") or row.get("order_status")
-        event["status"] = STATUS_MAP_BYBIT_TO_OMS.get(status_raw, status_raw or "NEW")
+        event["status"] = STATUS_MAP_EXCHANGE_TO_OMS.get(status_raw, status_raw or "NEW")
         # --- 識別子の受け渡し ---
         event["order_id"] = row.get("orderId")
         # --- 進捗情報（部分約定の累積） ---
@@ -108,8 +149,8 @@ async def _handle_private_execution(msg: dict, oms: OmsEngine) -> None:
         }
         event["symbol"] = row.get("symbol") or row.get("s")
         event["side"] = row.get("side") or row.get("S")
-        event["fee"] = row.get("execFee") or row.get("commission")
-        event["fee_currency"] = row.get("feeCurrency") or row.get("commissionAsset")
+        event["fee"] = row.get("execFee") or row.get("fillFee") or row.get("commission")
+        event["fee_currency"] = row.get("feeCurrency") or row.get("fillFeeCcy") or row.get("commissionAsset")
         event["order_id"] = row.get("orderId")
         event["exec_id"] = row.get("execId") or row.get("execIdStr") or row.get("execID")
         raw_flags: dict[str, object] = {}
@@ -121,7 +162,15 @@ async def _handle_private_execution(msg: dict, oms: OmsEngine) -> None:
             raw_flags["order_type"] = row.get("orderType")
         if raw_flags:
             event["raw_order_flags"] = raw_flags
-        if "isMaker" in row:
+        liq = row.get("liquidity")
+        if liq is not None:
+            try:
+                liq_str = str(liq).upper()
+                if liq_str in {"MAKER", "TAKER"}:
+                    event["liquidity"] = liq_str
+            except Exception:
+                pass
+        elif "isMaker" in row:
             try:
                 event["liquidity"] = "MAKER" if bool(row.get("isMaker")) else "TAKER"
             except Exception:
@@ -169,7 +218,7 @@ async def _cancel_all_open_orders(ex: ExchangeGateway) -> None:
 
 
 @retryable(tries=999999, wait_initial=1.0, wait_max=30.0)
-async def _run_private_ws(ex: BybitGateway, oms: OmsEngine, *, symbols: list[str]) -> None:
+async def _run_private_ws(ex: BitgetGateway, oms: OmsEngine, *, symbols: list[str]) -> None:
     """これは何をする関数？
     → Private WS に接続し、order/execution/position を購読して OMS へ流し続けます（断線時は自動再接続）。
     """
@@ -193,7 +242,7 @@ async def _run_private_ws(ex: BybitGateway, oms: OmsEngine, *, symbols: list[str
 
 
 @retryable(tries=999999, wait_initial=1.0, wait_max=30.0)
-async def _run_public_ws_for_paper(data_ex: BybitGateway, paper_ex: PaperExchange, symbols: list[str]) -> None:
+async def _run_public_ws_for_paper(data_ex: BitgetGateway, paper_ex: PaperExchange, symbols: list[str]) -> None:
     """これは何をする関数？
     → Paperモード用に Public WS を購読し、BBO/トレードを PaperExchange に転送します。
     """
@@ -244,10 +293,7 @@ async def _run_public_ws_for_paper(data_ex: BybitGateway, paper_ex: PaperExchang
         except Exception:
             pass
 
-    await data_ex.subscribe_public(
-        symbols=symbols,
-        callbacks={"publicTrade": _public_trade_cb, "orderbook": _orderbook_cb},
-    )
+    await data_ex.subscribe_public(symbols=symbols, callbacks={"trade": _public_trade_cb, "orderbook": _orderbook_cb})
 
 
 @retryable(tries=999999, wait_initial=0.5, wait_max=10.0)
@@ -266,7 +312,24 @@ async def _strategy_step_once(
         # 初期スケール未確定時は評価/発注をスキップ（2回連続で正規化確認）
         try:
             if hasattr(funding_source, "is_price_scale_ready") and not funding_source.is_price_scale_ready(sym, 2):
-                logger.info("guard.skip: price scale not ready yet sym={}", sym)
+                try:  # 何をする: priceScale即時プライムの呼び出し失敗で戦略ループが止まらないように保護し、成否を必ずログに残す
+                    res = getattr(funding_source, "_try_prime_scale", lambda *_: None)(
+                        sym
+                    )  # 何をする: instruments-info によるpriceScaleプライミングを試行
+                    logger.info(
+                        "scale.prime.call sym={} result={}", sym, res
+                    )  # 何をする: 呼び出しが実行された事実と戻り値を可視化（Noneも記録）
+                except Exception as e:
+                    logger.exception(
+                        "scale.prime.error sym=%s reason=%s", sym, e
+                    )  # 何をする: 例外内容を記録しつつ、ここではループを継続して無限スキップを解消する足がかりにする
+                reason = "price_scale_not_ready"
+                logger.info(
+                    "guard.skip sym={} reason={} ctx={}",
+                    sym,
+                    reason,
+                    _format_guard_context(locals()),
+                )
                 continue
         except Exception:
             pass
@@ -293,6 +356,13 @@ async def _main_async(
     setup_logging(level=log_level)
     cfg = load_config(cfg_path)
 
+    global _DEBUG_PRIVATE_WS
+    env_flag = os.environ.get("DEBUG_PRIVATE_WS") or os.environ.get("EXCHANGE__DEBUG_PRIVATE_WS")
+    if env_flag is not None:
+        _DEBUG_PRIVATE_WS = str(env_flag).lower() in {"1", "true", "yes", "on"}
+    else:
+        _DEBUG_PRIVATE_WS = False
+
     # 本番(mainnet)でallow_live=Falseなら、ここで止める（誤起動防止の安全弁）
     is_mainnet = (str(env or "").lower() == "mainnet") or (
         str(getattr(cfg.exchange, "environment", "")).lower() == "mainnet"
@@ -312,9 +382,17 @@ async def _main_async(
     if repo is not None:
         await repo.create_all()
 
-    # 実データ源（REST/WS）。dry-run でもデータ源として使用
-    data_ex = BybitGateway(api_key=cfg.keys.api_key, api_secret=cfg.keys.api_secret, environment=exchange_env)
-    # --- 設定の適用：BybitGateway（REST/BBO/価格ガード） ---
+    # 実データ源（REST）。dry-run でもデータ源として使用（Bitget）
+    data_ex = BitgetGateway(
+        api_key=cfg.keys.api_key,
+        api_secret=cfg.keys.api_secret,
+        passphrase=cfg.keys.passphrase,
+        environment=exchange_env,
+        use_uta=getattr(cfg.exchange, "use_uta", True),
+    )
+    if hasattr(data_ex, "_debug_private_ws"):
+        data_ex._debug_private_ws = _DEBUG_PRIVATE_WS
+    # --- 設定の適用：BitgetGateway（REST/BBO/価格ガード） ---
     data_ex._bbo_max_age_ms = cfg.exchange.bbo_max_age_ms  # BBO鮮度ガード（STEP28）
     data_ex._rest_max_concurrency = cfg.exchange.rest_max_concurrency  # REST同時実行上限（STEP29）
     data_ex._rest_semaphore = asyncio.Semaphore(data_ex._rest_max_concurrency)  # 新しい上限でセマフォを再構築
@@ -329,7 +407,6 @@ async def _main_async(
         # Use already imported classes; keep local stdlib imports only
         import csv
         import json
-        import os
         from datetime import datetime, timezone
 
         repo_ops = None if disable_db else Repo(db_url=cfg.db_url)
@@ -359,17 +436,39 @@ async def _main_async(
             risk_manager=rm_ops,
         )
 
+        # 理由文字列の文字化けを簡易補正（戦略側の固定文の既知パターン）
+        def _normalize_reason(reason: str | None) -> str | None:
+            if not reason:
+                return reason
+            mapping = {
+                "�ΏۊO�V���{��": "対象外シンボル",
+                "�\\�z�s���̂��߈�U����": "予測消失のためクローズ",
+                "Funding�������]�ŃN���[�Y": "Fundingがマイナスのためクローズ",
+                "APR��臒l����": "APRが閾値未満",
+                "�f���^�����ɂ��ăw�b�W": "デルタ乖離のためヘッジ",
+                "�z�[���h�p��": "ホールド継続",
+                "���X�N�Ǘ��ŐV�K��~": "リスク管理で新規停止",
+                "Funding�\\�z���擾�ł��Ȃ�": "Funding予測値を取得できない",
+                "����Funding�͐V�K�ΏۊO": "負のFundingは新規対象外",
+                "���ڏ���ɂ�茚�ĕs��": "余力制限により不可",
+                "���Ҏ��v���R�X�g����": "期待収益がコスト未満",
+                "Funding�@��ɂ��V�K����": "Funding条件により新規実行",
+            }
+            return mapping.get(reason, reason)
+
         rows: list[dict] = []
         for sym in syms:
             fi = await data_ex.get_funding_info(sym)
             bid, ask = await data_ex.get_bbo(sym)
             # Private auth check
             auth_ok = True
+            auth_err: str | None = None
             try:
                 oo = await data_ex.get_open_orders(sym)
                 open_n = len(oo)
-            except Exception:
+            except Exception as e:
                 auth_ok = False
+                auth_err = str(e)
                 open_n = 0
             logger.info(
                 "ops.check symbol={} funding={} next={} bbo=({}, {}) open={}",
@@ -388,7 +487,7 @@ async def _main_async(
                     perp_price=await data_ex.get_ticker(sym),
                 )
                 action = getattr(getattr(d, "action", None), "name", str(getattr(d, "action", "")))
-                reason = getattr(d, "reason", None)
+                reason = _normalize_reason(getattr(d, "reason", None))
                 apr = getattr(d, "predicted_apr", None)
             except Exception as e:
                 action, reason, apr = ("ERR", str(e), None)
@@ -400,6 +499,20 @@ async def _main_async(
                 apr,
                 reason,
             )
+            # 何をする？→ Bybitゲートウェイを取得（スケール準備・価格状態を参照するため）
+            gw = _get_bybit_gateway(data_ex) or data_ex
+            # 数量刻みと最小制約の内訳（ops-checkの“丸めの根拠”を可視化）
+            qty_step_spot = qty_step_perp = qty_common = None
+            min_qty_spot = min_qty_perp = min_notional_spot = min_notional_perp = None
+            try:
+                if gw is not None:
+                    qs, qp = _qty_steps_for_symbol(gw, sym)
+                    qty_step_spot, qty_step_perp = qs, qp
+                    qty_common = _qty_common_step(gw, sym)
+                    mqs, mqp, mns, mnp = _min_limits_for_symbol(gw, sym)
+                    min_qty_spot, min_qty_perp, min_notional_spot, min_notional_perp = mqs, mqp, mns, mnp
+            except Exception:
+                pass
             rows.append(
                 {
                     "ts": datetime.now(timezone.utc).isoformat(),
@@ -408,11 +521,33 @@ async def _main_async(
                     "next_funding_time": str(getattr(fi, "next_funding_time", None)),
                     "bbo_bid": bid,
                     "bbo_ask": ask,
+                    # 何をする？→ BBOが“ふつう”かどうかを判定して、ops-checkに書き出す
+                    "bbo_valid": _is_bbo_valid(bid, ask),
+                    # 何をする？→ 価格スケールの準備状況（True/False）をops-checkに書き出す
+                    "price_scale_ready": bool(_scale_ready_for_symbol(gw, sym)) if gw else False,
+                    # 何をする？→ 価格ガードの現在状態（READY/FROZEN/NO_ANCHOR/UNKNOWN）をops-checkに書き出す
+                    "price_state": _price_state_for_symbol(gw, sym) if gw else "UNKNOWN",
+                    # 何をする？→ 市場データREADY判定（Strategyの内部判定を優先。無ければフォールバック）
+                    "md_ready": bool(_market_data_ready_for_ops(strat_ops, sym, bid, ask)[0]),
+                    "md_reason": str(_market_data_ready_for_ops(strat_ops, sym, bid, ask)[1]),
+                    # 何をする？→ OMSのクールダウン現在地を可視化（残り時間ms含む）
+                    "cooldown_active": bool(_cooldown_info_for_symbol(oms_ops, sym)[0]),
+                    "cooldown_left_ms": int(_cooldown_info_for_symbol(oms_ops, sym)[1]),
+                    # 追加: 数量刻み(spot/perp)・共通刻み・最小数量/名目額
+                    "qty_step_spot": qty_step_spot,
+                    "qty_step_perp": qty_step_perp,
+                    "qty_common_step": qty_common,
+                    "min_qty_spot": min_qty_spot,
+                    "min_qty_perp": min_qty_perp,
+                    "min_notional_spot": min_notional_spot,
+                    "min_notional_perp": min_notional_perp,
                     "auth": bool(auth_ok),
+                    "auth_message": str(getattr(oms_ops, "auth_message", "")),  # 認証理由の可視化（最小追加）
                     "open_orders": int(open_n),
                     "decision": action,
                     "predicted_apr": float(apr) if apr is not None else None,
                     "reason": reason,
+                    "auth_error": auth_err,
                     "taker_fee_bps_roundtrip": taker_bps,
                     "estimated_slippage_bps": slip_bps,
                     "min_expected_apr": getattr(cfg.strategy, "min_expected_apr", None),
@@ -454,8 +589,16 @@ async def _main_async(
         assert isinstance(trade_ex, PaperExchange)
         trade_ex.bind_oms(oms)
     else:
-        trade_ex = BybitGateway(api_key=cfg.keys.api_key, api_secret=cfg.keys.api_secret, environment=exchange_env)
-        # --- 設定の適用：BybitGateway（REST/BBO/価格ガード） ---
+        trade_ex = BitgetGateway(
+            api_key=cfg.keys.api_key,
+            api_secret=cfg.keys.api_secret,
+            passphrase=cfg.keys.passphrase,
+            environment=exchange_env,
+            use_uta=getattr(cfg.exchange, "use_uta", True),
+        )
+        if hasattr(trade_ex, "_debug_private_ws"):
+            trade_ex._debug_private_ws = _DEBUG_PRIVATE_WS
+        # --- 設定の適用：BitgetGateway（REST/BBO/価格ガード） ---
         trade_ex._bbo_max_age_ms = cfg.exchange.bbo_max_age_ms  # BBO鮮度ガード（STEP28）
         trade_ex._rest_max_concurrency = cfg.exchange.rest_max_concurrency  # REST同時実行上限（STEP29）
         trade_ex._rest_semaphore = asyncio.Semaphore(trade_ex._rest_max_concurrency)  # 新しい上限でセマフォを再構築
@@ -483,8 +626,6 @@ async def _main_async(
         if s:
             await s.flatten_all()
 
-    import os
-
     _flip_min = float(os.environ.get("RISK__FUNDING_FLIP_MIN_ABS", "0") or 0)
     _flip_n = int(os.environ.get("RISK__FUNDING_FLIP_CONSECUTIVE", "1") or 1)
     rm = RiskManager(
@@ -496,6 +637,8 @@ async def _main_async(
         funding_flip_min_abs=_flip_min,
         funding_flip_consecutive=_flip_n,
     )
+
+    _maybe_reset_kill_on_start(rm)  # 起動時に必要ならKILLラッチを自動解除（RISK__RESET_KILL_ON_START=true のときだけ）
 
     # Strategy
     taker_bps = float(os.environ.get("STRATEGY__TAKER_FEE_BPS_ROUNDTRIP", "6.0") or 6.0)
@@ -529,7 +672,7 @@ async def _main_async(
         price_source = trade_ex  # perpはBBO中値/last、spotはRESTフォールバック
     else:
         # Private WS：注文/約定イベントをOMSへ
-        assert isinstance(trade_ex, BybitGateway)
+        assert isinstance(trade_ex, BitgetGateway)
         tasks.append(asyncio.create_task(_run_private_ws(ex=trade_ex, oms=oms, symbols=cfg.strategy.symbols)))
         price_source = data_ex  # 価格はRESTのtickerで取得
 
@@ -568,6 +711,15 @@ async def _main_async(
     except asyncio.CancelledError:
         pass
     finally:
+        # ccxt リソース解放
+        try:
+            await trade_ex.close()  # ccxt async close で警告抑制
+        except Exception:
+            pass
+        try:
+            await data_ex.close()
+        except Exception:
+            pass
         if flatten_on_exit:
             try:
                 oms._log.info("shutdown.begin flatten_on_exit=true")  # 構造化ログ（STEP38）
@@ -579,10 +731,131 @@ async def _main_async(
                 pass
 
 
+def _precheck_api_key_from_opscheck(path: str = "ops-check.json") -> bool:
+    """起動時に一度だけ実行する“API鍵プレチェック”（動作は変えずに警告だけ出す）。
+    - 目的: 直近の ops-check 結果（認証可否/retCode 相当）を読み、人がすぐ気づけるようにする。
+    - 返り値: True=問題なさそう / False=問題の可能性あり（この関数では停止しない）
+    """
+
+    # 関数内で標準loggingを使う（loguruと並存可）
+    import logging
+    import re
+
+    logger_std = logging.getLogger(__name__)
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        logger_std.info("API precheck: ops-check.json not found (skip)")
+        return True
+    except Exception as e:  # 破損JSONなどは警告のみ
+        logger_std.warning("API precheck: failed to read/parse ops-check.json: %s", e)
+        return True
+
+    problems: list[str] = []
+
+    def _scan_entry(entry: dict) -> None:
+        sym = entry.get("symbol") or entry.get("sym") or "?"
+        # 1) 明示のauthフラグ
+        auth = entry.get("auth")
+        if isinstance(auth, bool) and not auth:
+            msg = entry.get("auth_message") or entry.get("auth_error") or "auth=false"
+            problems.append(f"{sym}: {msg}")
+        # 2) retCodeが文字列中に埋まっているケース
+        for k in ("auth_message", "auth_error", "message", "error"):
+            s = entry.get(k)
+            if isinstance(s, str):
+                m = re.search(r"retCode\"?\s*:\s*(-?\d+)", s)
+                if m and int(m.group(1)) != 0:
+                    problems.append(f"{sym}: retCode={m.group(1)} {s}")
+        # 3) 直下にretCodeがあるケース
+        rc = entry.get("retCode")
+        try:
+            if rc is not None and int(rc) != 0:
+                problems.append(f"{sym}: retCode={rc} {entry.get('retMsg') or entry.get('retMessage') or ''}")
+        except Exception:
+            pass
+
+        # Bitget mix books/books1/books5/books15 形式の BBO も BitgetGateway 側キャッシュに反映する
+        try:
+            arg = msg.get("arg") or {}
+            channel = (arg.get("channel") or "").lower()
+            if channel in {"books", "books1", "books5", "books15"}:
+                data_obj = msg.get("data") or []
+                item = None
+                if isinstance(data_obj, list):
+                    item = data_obj[0] if data_obj else None
+                elif isinstance(data_obj, dict):
+                    item = data_obj
+                if item:
+                    bids = item.get("bids") or []
+                    asks = item.get("asks") or []
+                    bid = None
+                    ask = None
+                    if isinstance(bids, list) and bids:
+                        try:
+                            bid = float(bids[0][0])
+                        except Exception:
+                            bid = None
+                    if isinstance(asks, list) and asks:
+                        try:
+                            ask = float(asks[0][0])
+                        except Exception:
+                            ask = None
+                    sym = arg.get("instId") or item.get("instId")
+                    if sym and (bid is not None or ask is not None):
+                        data_ex.update_bbo(sym, bid, ask, item.get("ts"))
+        except Exception:
+            pass
+
+    if isinstance(data, list):
+        for row in data:
+            if isinstance(row, dict):
+                _scan_entry(row)
+    elif isinstance(data, dict):
+        # 1件のみの形式にも対応
+        _scan_entry(data)
+    else:
+        logger_std.info("API precheck: unsupported ops-check format (skip)")
+        return True
+
+    if problems:
+        # ここでは停止しない。明確なエラーとして通知だけ行う。
+        joined = " | ".join(problems)
+        if len(joined) > 800:
+            joined = joined[:800] + "..."
+        logger_std.error("API precheck: NG -- possible auth issue(s): %s", joined)
+        return False
+
+    logger_std.info("API precheck: OK -- no recent auth errors in ops-check.json")
+    return True
+
+
+def _maybe_reset_kill_on_start(risk) -> None:
+    """
+    何をする関数？:
+      起動直後に、環境変数 RISK__RESET_KILL_ON_START が "true" のときだけ
+      RiskManager.reset_kill(...) を呼んで KILL ラッチを解除する“運用用の入口”。
+      - 他のガードやしきい値には影響しない（解除はラッチ解除のみ）
+      - なぜ解除したかをログに残し、後から追跡できるようにする
+    """
+    import logging
+    from os import getenv  # この関数内でしか使わないので、例外的にここで import（規約どおり）
+
+    if str(getenv("RISK__RESET_KILL_ON_START", "false")).lower() == "true":
+        try:
+            risk.reset_kill(reason="env RISK__RESET_KILL_ON_START=true")  # 起動時の“再開ボタン”
+        except Exception as e:
+            logging.getLogger(__name__).warning("KILL-RESET: failed to reset on start: %s", e)  # 失敗もログに残す
+
+
 def main() -> None:
     """これは何をする関数？
     → コマンドライン引数を読み取り、イベントループで Live ランナーを起動します。
     """
+
+    _precheck_api_key_from_opscheck()  # 起動時に一度だけAPI鍵の事前チェック結果をログで可視化（動作は止めない）
 
     parser = argparse.ArgumentParser(
         description="Live runner for funding/basis strategy (testnet/mainnet, dry-run supported)"
