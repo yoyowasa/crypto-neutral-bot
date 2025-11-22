@@ -1,7 +1,7 @@
 """Bitget UTA 向けの最小ゲートウェイ実装。
 
 - REST（ccxt）を中心に、残高/ポジション/注文/BBO/Funding を提供する。
-- WS は現状未実装（Private/ Public とも）。Bybit 用の WS ロジックとは分離して扱う。
+- WS は現状未実装（Private/ Public とも）。Bitget 用の WS ロジックとは分離して扱う。
 """
 
 from __future__ import annotations
@@ -30,6 +30,13 @@ from .base import ExchangeGateway
 from .types import Balance, FundingInfo, Order, OrderRequest, Position
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_float(val: Any) -> float | None:
+    try:
+        return float(val) if val is not None else None
+    except Exception:
+        return None
 
 
 async def _bitget_subscribe_private_impl(
@@ -336,7 +343,7 @@ class BitgetGateway(ExchangeGateway):
         # internal_symbol は "BTCUSDT" / "BTCUSDT_SPOT" のような表記を想定。
         self._scale_cache: Dict[str, Dict[str, float]] = {}
 
-        # BBO / 価格状態の簡易キャッシュ（Bybit 実装に寄せた形）
+        # BBO / 価格状態の簡易キャッシュ（Bitget 実装に寄せた形）
         self._bbo_cache: Dict[str, dict] = {}
         self._bbo_max_age_ms: int = 3000
         self._price_state: Dict[str, str] = {}  # {symbol: "READY" | "UNKNOWN" など}
@@ -394,59 +401,49 @@ class BitgetGateway(ExchangeGateway):
             limits = perp.get("limits") or {}
             # 価格スケール
             price_step_raw = prec.get("price")
-            if price_step_raw not in (None, 0):
+            price_step = _safe_float(price_step_raw)
+            if price_step is not None and price_step != 0:
                 try:
-                    price_step = float(price_step_raw)
                     scale = max(0, -int(round(Decimal(str(price_step)).log10())))
                 except Exception:
                     scale = None
                 if scale is not None:
                     info["priceScale"] = float(scale)
-                    info["tickSize"] = price_step
+                    info["tickSize"] = float(price_step)
             # 量スケール
             qty_step_raw = prec.get("amount") or (limits.get("amount") or {}).get("min")
-            if qty_step_raw not in (None, 0):
-                try:
-                    qty_step = float(qty_step_raw)
-                    info["qtyStep_perp"] = qty_step
-                    info.setdefault("minQty_perp", qty_step)
-                except Exception:
-                    pass
+            qty_step = _safe_float(qty_step_raw)
+            if qty_step is not None and qty_step != 0:
+                info["qtyStep_perp"] = float(qty_step)
+                info.setdefault("minQty_perp", float(qty_step))
             min_notional_raw = (limits.get("cost") or {}).get("min")
-            if min_notional_raw not in (None, 0):
-                try:
-                    info["minNotional_perp"] = float(min_notional_raw)
-                except Exception:
-                    pass
+            min_notional = _safe_float(min_notional_raw)
+            if min_notional is not None and min_notional != 0:
+                info["minNotional_perp"] = float(min_notional)
 
         # spot 側
         if spot:
             prec = spot.get("precision") or {}
             limits = spot.get("limits") or {}
             price_step_raw = prec.get("price")
-            if price_step_raw not in (None, 0):
+            price_step = _safe_float(price_step_raw)
+            if price_step is not None and price_step != 0:
                 try:
-                    price_step = float(price_step_raw)
                     scale = max(0, -int(round(Decimal(str(price_step)).log10())))
                 except Exception:
                     scale = None
                 if scale is not None and "priceScale" not in info:
                     info["priceScale"] = float(scale)
-                    info["tickSize"] = price_step
+                    info["tickSize"] = float(price_step)
             qty_step_raw = prec.get("amount") or (limits.get("amount") or {}).get("min")
-            if qty_step_raw not in (None, 0):
-                try:
-                    qty_step = float(qty_step_raw)
-                    info["qtyStep_spot"] = qty_step
-                    info.setdefault("minQty_spot", qty_step)
-                except Exception:
-                    pass
+            qty_step = _safe_float(qty_step_raw)
+            if qty_step is not None and qty_step != 0:
+                info["qtyStep_spot"] = float(qty_step)
+                info.setdefault("minQty_spot", float(qty_step))
             min_notional_raw = (limits.get("cost") or {}).get("min")
-            if min_notional_raw not in (None, 0):
-                try:
-                    info["minNotional_spot"] = float(min_notional_raw)
-                except Exception:
-                    pass
+            min_notional = _safe_float(min_notional_raw)
+            if min_notional is not None and min_notional != 0:
+                info["minNotional_spot"] = float(min_notional)
 
         if info:
             self._scale_cache[core] = info
@@ -845,7 +842,7 @@ class BitgetGateway(ExchangeGateway):
     async def subscribe_private(self, callbacks: dict[str, Callable[[dict], Awaitable[None]]]) -> None:
         """Bitget Private WS は現時点では未実装。
 
-        - Live runner 側で Bybit のみ WS を使うようガードする。
+        - Live runner 側で Bitget のみ WS を使うようガードする。
         - 将来的に orders/account/positions チャネルをここで実装する想定。
         """
 
@@ -859,7 +856,7 @@ class BitgetGateway(ExchangeGateway):
     ) -> None:
         """Bitget Public WS は現時点では未実装。
 
-        - Paper runner は Bybit 前提のまま利用する想定。
+        - Paper runner は Bitget 前提のまま利用する想定。
         - 将来的に ticker/orderbook/trades をここで実装する想定。
         """
 

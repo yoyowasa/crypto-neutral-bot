@@ -1,10 +1,10 @@
-# Bitget 移行メモ（Bybit → Bitget）
+# Bitget 移行メモ（Bitget → Bitget）
 
 > 注意: これは開発用メモです。実際の運用・法令・税務は必ずご自身の責任で最新の公式ドキュメント・規約を確認してください。
 
 ## 1. コード側の前提
 
-- `ExchangeGateway` 抽象はそのまま維持し、`BybitGateway` に加えて `BitgetGateway` を追加した。
+- `ExchangeGateway` 抽象はそのまま維持し、`BitgetGateway` に加えて `BitgetGateway` を追加した。
   - 新規ファイル: `bot/exchanges/bitget.py`
   - REST は ccxt の `bitget` を利用（UTA 前提、`options["uta"]=True`）。
   - 実装済みメソッド:
@@ -12,10 +12,10 @@
     - 注文系: `place_order`, `cancel_order`, `amend_order`
     - 後始末: `close`
   - 未実装（今後対応予定）:
-    - `subscribe_public` / `subscribe_private`（WS は Bybit のみ利用する想定）
+    - `subscribe_public` / `subscribe_private`（WS は Bitget のみ利用する想定）
 
 - 共通設定モデル `ExchangeConfig` はそのまま利用しつつ、ドキュメント上は以下の方針とする:
-  - `exchange.name` が `"bybit"` → `BybitGateway` を使う
+  - `exchange.name` が `"bitget"` → `BitgetGateway` を使う
   - `exchange.name` が `"bitget"` → `BitgetGateway` を使う想定（runner 側の切替は今後のステップ）
   - `exchange.environment` は Bitget ではメモ用途（文字列は `"mainnet"` 固定でよい）
 
@@ -24,7 +24,7 @@
 ### 2.1 シンボル表記
 
 - 内部表記:
-  - パーペチュアル: `BTCUSDT`, `ETHUSDT` …（既存 Bybit と同じ）
+  - パーペチュアル: `BTCUSDT`, `ETHUSDT` …（既存 Bitget と同じ）
   - 現物: `BTCUSDT_SPOT`, `ETHUSDT_SPOT` …（末尾 `_SPOT`）
 - ccxt へのマッピング（`BitgetGateway._to_ccxt_symbol`）:
   - perp: `"BTCUSDT"` → `"BTC/USDT:USDT"`
@@ -57,13 +57,13 @@
 
 ## 3. ランナー側との統合方針（このコミット時点のステータス）
 
-- 現状の `live_runner.py` / `paper_runner.py` は引き続き `BybitGateway` 前提で動作している。
-  - Private/Public WS は Bybit v5 専用のため、Bitget 用にはまだ差し替えていない。
+- 現状の `live_runner.py` / `paper_runner.py` は引き続き `BitgetGateway` 前提で動作している。
+  - Private/Public WS は Bitget v5 専用のため、Bitget 用にはまだ差し替えていない。
   - `BitgetGateway.subscribe_private` / `subscribe_public` は `WsDisconnected` を投げるスタブ実装。
 
 - 今後の統合ステップ案:
   1. `live_runner` / `paper_runner` に「取引所ファクトリ」を追加し、
-     - `exchange.name` に応じて `BybitGateway` / `BitgetGateway` を選択する。
+     - `exchange.name` に応じて `BitgetGateway` / `BitgetGateway` を選択する。
   2. Bitget を選んだ場合の挙動:
      - 短期的: REST ベースで `get_bbo` / `get_funding_info` を呼び出し、WS のないモードで戦略を動かす（約定反映は遅延前提）。
      - 中期的: Bitget WebSocket API から
@@ -77,12 +77,12 @@
 > このコミットでは **設定ファイルそのものは書き換えていません**。移行時に手動で編集する前提です。
 
 - `.env` / `.env.example`
-  - これまでと同じキー名で Bitget の API キーを設定する（ラベルだけ Bybit から Bitget に読み替え）。
+  - これまでと同じキー名で Bitget の API キーを設定する（ラベルだけ Bitget から Bitget に読み替え）。
     - `KEYS__API_KEY=your_bitget_key`
     - `KEYS__API_SECRET=your_bitget_secret`
 
 - `config/app.yaml` / `config/app.mainnet.yaml`
-  - `exchange.name` を `"bybit"` → `"bitget"` に変更。
+  - `exchange.name` を `"bitget"` → `"bitget"` に変更。
   - `exchange.environment` は `"mainnet"` のままでよい（Bitget では記録用の文字列）。
 
 ## 5. 今後の TODO（コード側）
@@ -90,7 +90,7 @@
 - `BitgetGateway`:
   - Private WS（orders/positions/account）の実装と、`_handle_private_order` 相当のマッピング。
   - Public WS（orderbook/trades）の実装と、`PaperExchange.handle_public_msg` 互換のメッセージ整形。
-  - レートリミット・429 時の指数バックオフ（Bybit の `_RestWrapper` 相当）。
+  - レートリミット・429 時の指数バックオフ（Bitget の `_RestWrapper` 相当）。
 
 - ランナー:
   - `bot/app/live_runner.py` / `bot/app/paper_runner.py` に Bitget 対応の分岐を追加。

@@ -380,7 +380,7 @@ class BacktestRunner:
             self._data_src.set_now(tick.ts)
             self._data_src.update_price(tick.symbol, bid=tick.bid, ask=tick.ask, last=tick.last)
 
-            # PaperExchange に BBO・trade を通知（Bybit v5 形式に擬態）
+            # PaperExchange に BBO・trade を通知（Bitget 形式に擬態）
             if tick.bid is not None or tick.ask is not None:
                 msg_ob = {
                     "topic": f"orderbook.1.{tick.symbol}",

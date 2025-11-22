@@ -4,7 +4,7 @@ keys:
   api_secret: "${KEYS__API_SECRET:-}"
 
 exchange:
-  name: bybit
+  name: bitget
   environment: mainnet
   allow_live: true  # Explicitly enable live trading for mainnet
 

@@ -23,7 +23,7 @@ from bot.oms.engine import OmsEngine
 from bot.oms.fill_sim import PaperExchange
 from bot.ops.check import (
     _cooldown_info_for_symbol,  # ops-check見える化: クールダウンの現在地
-    _get_bybit_gateway,  # ops-check見える化: Bybit GW取得
+    _get_bitget_gateway,  # ops-check見える化: Bitget GW取得
     _is_bbo_valid,  # ops-check見える化: BBOの妥当性
     _market_data_ready_for_ops,  # ops-check見える化: 市場データREADY/理由
     _min_limits_for_symbol,
@@ -58,24 +58,24 @@ def _format_guard_context(_ldict: dict) -> dict:
     return ctx
 
 
-# Bybit v5 -> OMS ステータス正規化対応表
+# Bitget v5 -> OMS ステータス正規化対応表
 STATUS_MAP_EXCHANGE_TO_OMS = {
     "Created": "NEW",
     "New": "NEW",
     "PartiallyFilled": "PARTIAL",
     "Filled": "FILLED",
-    "Cancelled": "CANCELED",  # Bybit側は"Cancelled"表記
+    "Cancelled": "CANCELED",  # Bitget側は"Cancelled"表記
     "Canceled": "CANCELED",  # 念のため表記ゆれも同値扱い
     "Rejected": "REJECTED",
     "Untriggered": "NEW",  # 条件注文が未発火のときはNEW相当として扱う
 }
 
-# ===== Bybit Privateメッセージ → OMSイベント の最小変換（MVP） =====
+# ===== Bitget Privateメッセージ → OMSイベント の最小変換（MVP） =====
 
 
 def _status_map(s: str | None) -> str:
     """これは何をする関数？
-    → Bybitのステータス文字列をOMS内部の表現にざっくり正規化します。
+    → Bitgetのステータス文字列をOMS内部の表現にざっくり正規化します。
     """
 
     s = (s or "").lower()
@@ -110,7 +110,7 @@ async def _handle_private_order(msg: dict, oms: OmsEngine) -> None:
             "cum_filled_qty": float(row.get("cumExecQty") or 0),
             "avg_fill_price": float(row.get("avgPrice")) if row.get("avgPrice") is not None else None,
         }
-        # --- ステータス正規化（Bybit -> OMS） ---
+        # --- ステータス正規化（Bitget -> OMS） ---
         status_raw = row.get("orderStatus") or row.get("order_status")
         event["status"] = STATUS_MAP_EXCHANGE_TO_OMS.get(status_raw, status_raw or "NEW")
         # --- 識別子の受け渡し ---
@@ -252,7 +252,7 @@ async def _run_public_ws_for_paper(data_ex: BitgetGateway, paper_ex: PaperExchan
 
     async def _orderbook_cb(msg: dict) -> None:
         await paper_ex.handle_public_msg(msg)
-        # BybitGateway にもBBOをキャッシュさせる（PostOnly調整の低遅延化）
+        # BitgetGateway にもBBOをキャッシュさせる（PostOnly調整の低遅延化）
         try:
             topic = (msg.get("topic") or "").lower()
             if topic.startswith("orderbook"):
@@ -498,8 +498,8 @@ async def _main_async(
                 apr,
                 reason,
             )
-            # 何をする？→ Bybitゲートウェイを取得（スケール準備・価格状態を参照するため）
-            gw = _get_bybit_gateway(data_ex) or data_ex
+            # 何をする？→ Bitgetゲートウェイを取得（スケール準備・価格状態を参照するため）
+            gw = _get_bitget_gateway(data_ex) or data_ex
             # 数量刻みと最小制約の内訳（ops-checkの“丸めの根拠”を可視化）
             qty_step_spot = qty_step_perp = qty_common = None
             min_qty_spot = min_qty_perp = min_notional_spot = min_notional_perp = None
@@ -575,7 +575,7 @@ async def _main_async(
                 logger.warning("ops.export json failed: {}", e)
         return
 
-    # 発注先（dry-run は PaperExchange、live は BybitGateway）
+    # 発注先（dry-run は PaperExchange、live は BitgetGateway）
     if dry_run:
         trade_ex: ExchangeGateway = PaperExchange(data_source=data_ex, initial_usdt=100_000.0)
         oms = OmsEngine(ex=trade_ex, repo=repo, cfg=None)

@@ -12,7 +12,7 @@
 - STEP0 仕様文書：`docs/spec_mvp.md`
 - STEP2 設定と型：`bot/config/models.py`, `bot/config/loader.py`, `.env.example`, `config/app.yaml`
 - STEP3 コア：`bot/core/logging.py`, `bot/core/time.py`, `bot/core/retry.py`, `bot/core/errors.py`（コアのpytest通過）
-- STEP4 Exchange抽象＋Bybit実装 雛形（REST: ccxt、WS: v5）
+- STEP4 Exchange抽象＋Bitget実装 雛形（REST: ccxt、WS: v5）
 - STEP5 DB永続化（SQLite/SQLAlchemy）：スキーマ＋Repo
 - STEP6 OMS（状態機械、タイムアウト、再送、ヘッジ命令）
 - STEP7 リスク・キルスイッチ（事前チェック／事後監視／flatten_all）
@@ -60,8 +60,8 @@
 
 - `bot/exchanges/types.py`：`Balance/Position/OrderRequest/Order/FundingInfo`
 - `bot/exchanges/base.py`：抽象 `ExchangeGateway`（残高・ポジ・注文・Ticker・Funding・WS購読）
-- `bot/exchanges/bybit.py`（雛形＋v5コメント写経）  
-  - `subscribe_public/subscribe_private`：Bybit v5のPublic/Private WSを購読してコールバック  
+- `bot/exchanges/bitget.py`（雛形＋v5コメント写経）  
+  - `subscribe_public/subscribe_private`：Bitget v5のPublic/Private WSを購読してコールバック  
   - `get_funding_info`：predicted/nextの受け渡し（※フィールド名はTODO:要API確認）
 
 #### 2.4 データ永続化（STEP5）
@@ -132,8 +132,8 @@
 
 - **停止時のリソース解放**  
   `paper_runner.py`：`finally` で全タスクキャンセル＋データ源の `close()` を `await`（Unclosed connector 抑止）。  
-  `bybit.py`：Public WS `subscribe_public()` を `finally`で必ず `ws.close()`。  
-  `BybitGateway.close()`：ccxt async クライアントやWSを明示Close（新規追加）。  
+  `bitget.py`：Public WS `subscribe_public()` を `finally`で必ず `ws.close()`。  
+  `BitgetGateway.close()`：ccxt async クライアントやWSを明示Close（新規追加）。  
   （補足）REST呼び出しで ccxtインスタンスを都度生成しない運用に統一（単一 `self._ccxt` を共有）。
 
 - **ツールチェーンの警告解消＆実行方法統一**  
@@ -150,7 +150,7 @@
 - **Paper起動**：`poetry run python -m bot.app.paper_runner --config config/app.yaml`  
   - `logs/app.log` に `logging initialized ...` → **OK**  
   - `metrics heartbeat: sym=BTCUSDT / ETHUSDT ...` が30秒ごとに出力 → **OK**  
-  - 停止時（Ctrl+C）に `Unclosed connector` が出ないことを確認（出る場合は `BybitGateway.close()` と単一 `self._ccxt` が未適用の可能性あり）
+  - 停止時（Ctrl+C）に `Unclosed connector` が出ないことを確認（出る場合は `BitgetGateway.close()` と単一 `self._ccxt` が未適用の可能性あり）
 
 ---
 
@@ -175,12 +175,12 @@
 
 ### 6. 既知のTODO／最終確認が必要な点
 
-- **Bybit v5 の最終フィールド確認（公式ドキュメントで照合）**  
+- **Bitget v5 の最終フィールド確認（公式ドキュメントで照合）**  
   `orderLinkId`（client id）、`predicted funding rate`／`next funding time` の正確なキー名  
   Public/Private WSのトピック名・認証負荷、URL
 - **Funding取得の安定化**：`predicted_rate` が無い場合のフォールバック戦略（APR閾値に届かずHOLDのまま）
 - **手数料・スリッページの実値**：MVPの係数を実績で補正（設定化して日次見直し）
-- **シンボル正規化**：Bybitのインストルメント情報APIでSpot/Perpの正式表記を取得し内部マップに反映
+- **シンボル正規化**：Bitgetのインストルメント情報APIでSpot/Perpの正式表記を取得し内部マップに反映
 - **Live 安全稼働テスト**：Testnetで最小ロット／WS断・429の自動復帰の実機確認
 - **pre-commit**：`ruff check`／`mypy` をフックに設定（導入済みなら見直し）
 
@@ -189,40 +189,40 @@
 新規追加：docs/progress.md（上のコードブロックをそのまま保存）。
 
 既存ファイルの変更はありません。
-### 7. STEP13–25 実装ログ（Bybit v5 安定化と安全化）
+### 7. STEP13–25 実装ログ（Bitget v5 安定化と安全化）
 
-- STEP13: Funding情報の最終確定（Bybit v5）
+- STEP13: Funding情報の最終確定（Bitget v5）
   - 予測レートと次回時刻を Ticker 優先で取得し、欠落時は history / instruments-info で補完。
-  - 変更: `bot/exchanges/bybit.py: get_funding_info`
+  - 変更: `bot/exchanges/bitget.py: get_funding_info`
   - 型: `bot/exchanges/types.py: FundingInfo` に `funding_interval_hours` を保持。
 
 - STEP14: client_order_id（orderLinkId）の往復配線
   - OMS 未指定時に `bot-<uuid32hex>` を自動採番して発注へ通す。
-  - 変更: `bot/oms/engine.py: submit()`／`bot/exchanges/bybit.py: place_order()`（orderLinkId を必ず送る）
+  - 変更: `bot/oms/engine.py: submit()`／`bot/exchanges/bitget.py: place_order()`（orderLinkId を必ず送る）
   - 型: `bot/exchanges/types.py: OrderRequest / Order` に `client_order_id` を追加。
 
 - STEP15: Private WS イベントへ client_order_id を確実に載せる
   - 変更: `bot/app/live_runner.py` の private order/execution コールバックで `client_order_id` を設定。
 
 - STEP16: client_order_id での取消（orderId 不明でも安全）
-  - 変更: `bot/exchanges/base.py: cancel_order`、`bot/exchanges/bybit.py: cancel_order`（orderId or orderLinkId）
+  - 変更: `bot/exchanges/base.py: cancel_order`、`bot/exchanges/bitget.py: cancel_order`（orderId or orderLinkId）
   - OMS 側: `bot/oms/engine.py` は `client_order_id` を優先で渡す／Paper はシグネチャ合わせ。
 
 - STEP17: 同一 client_order_id の二重発注ブロック
   - 変更: `bot/oms/engine.py` に `_inflight_client_ids` を導入。`submit()` で重複チェック→登録、`on_execution_event()` で終端時に掃除。
 
 - STEP18: 再起動/再接続で open 注文を再構築（reconcile）
-  - 変更: `bot/exchanges/bybit.py: get_open_orders`（/v5/order/realtime）
+  - 変更: `bot/exchanges/bitget.py: get_open_orders`（/v5/order/realtime）
   - OMS: `reconcile_inflight_open_orders(symbols)` を追加し、Private WS 接続直後に一度呼ぶ（`bot/app/live_runner.py`）。
 
 - STEP19: REST に指数バックオフ再試行（@retryable）
-  - 変更: `bot/exchanges/bybit.py` の `place_order / cancel_order / get_funding_info / get_open_orders` に `@retryable()` を付与。
+  - 変更: `bot/exchanges/bitget.py` の `place_order / cancel_order / get_funding_info / get_open_orders` に `@retryable()` を付与。
 
 - STEP20: シンボル正規化＆カテゴリ自動判定（spot/linear/inverse）
-  - 変更: `bot/exchanges/bybit.py: _resolve_category` を実装、instruments-info で正しく判定＆キャッシュ。既存の endswith 判定は置換。
+  - 変更: `bot/exchanges/bitget.py: _resolve_category` を実装、instruments-info で正しく判定＆キャッシュ。既存の endswith 判定は置換。
 
 - STEP21: 価格/数量の正規化（tickSize/qtyStep/min-max）
-  - 追加: `bybit.py: _get_instrument_info / _quantize_step / _dec_to_str / _normalize_price_qty`
+  - 追加: `bitget.py: _get_instrument_info / _quantize_step / _dec_to_str / _normalize_price_qty`
   - `place_order` 送信直前に丸め・範囲保証・指数表記なし化を実施。
 
 - STEP22: WS ステータス正規化＋部分約定の進捗をイベントに載せる
@@ -230,14 +230,14 @@
 
 - STEP23: PostOnly / ReduceOnly / TIF をエンドツーエンド配線
   - 型: `OrderRequest` の `time_in_force/post_only/reduce_only` を活用。
-  - 変更: `bybit.py: place_order` で `timeInForce="PostOnly"` 優先、先物系のみ `reduceOnly=True`。戦略のクローズ系注文は `reduce_only=True`。
+  - 変更: `bitget.py: place_order` で `timeInForce="PostOnly"` 優先、先物系のみ `reduceOnly=True`。戦略のクローズ系注文は `reduce_only=True`。
 
 - STEP24: PostOnly 価格を「非クロス」に自動微調整（BBO 参照）
-  - 追加: `bybit.py: _ensure_post_only_price`（BUY→ask-1tick / SELL→bid+1tick、安全側で再丸め）
+  - 追加: `bitget.py: _ensure_post_only_price`（BUY→ask-1tick / SELL→bid+1tick、安全側で再丸め）
   - `place_order` で PostOnly の Limit 時のみ適用。
 
 - STEP25: 公開 WS の BBO をゲートウェイでキャッシュ（低遅延化）
-  - 追加: `bybit.py: update_bbo / get_bbo` と `_bbo_cache`。`_ensure_post_only_price` は WS キャッシュ優先、無ければ REST 補完。
+  - 追加: `bitget.py: update_bbo / get_bbo` と `_bbo_cache`。`_ensure_post_only_price` は WS キャッシュ優先、無ければ REST 補完。
   - `bot/app/live_runner.py` で orderbook トピックから BBO を `update_bbo()` に反映。
 
 — 総合効果 —

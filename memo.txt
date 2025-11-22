@@ -1,14 +1,14 @@
 プロジェクト全体のざっくりMEMO（実運用ボットの構成と役割）
 
 目的
-- Bybit v5 を対象に、資金調達（Funding）/ベーシス戦略の実運用ボットを安全ガード付きで動かす。
+- Bitget v5 を対象に、資金調達（Funding）/ベーシス戦略の実運用ボットを安全ガード付きで動かす。
 - Testnet と Mainnet を切り替え可能（Mainnet は allow_live スイッチで明示許可）。
 
 実行エントリ
 - bot/app/live_runner.py
   - 本番/テストネットでの実行ランナー。設定読み込み、ゲートウェイ/OMS/戦略/メトリクス/レポートの起動。
   - 起動保護: environment=mainnet かつ exchange.allow_live=false の場合は起動停止（ConfigError）。
-  - 設定値を BybitGateway/OMS に反映（RESTセマフォ/サーキット/TTL/BBO鮮度/価格逸脱/WS古さ/クールダウンなど）。
+  - 設定値を BitgetGateway/OMS に反映（RESTセマフォ/サーキット/TTL/BBO鮮度/価格逸脱/WS古さ/クールダウンなど）。
 
 - bot/app/paper_runner.py
   - Paper（疑似）実行ランナー。実注文は出さず、Public WS/BBO を使って PaperExchange による約定シミュレーションを行う。
@@ -27,8 +27,8 @@
   - .env → YAML（config/app.yaml）→ 環境変数の優先でマージし、AppConfig を返す。
   - EXCHANGE__ALLOW_LIVE など環境変数で上書き可能。
 
-取引所ゲートウェイ（Bybit v5）
-- bot/exchanges/bybit.py
+取引所ゲートウェイ（Bitget v5）
+- bot/exchanges/bitget.py
   - REST/WS の統合。主機能:
     - RESTセマフォ（同時実行上限）: 429 予防。
     - RESTサーキットブレーカ: 連続失敗で短時間休止。

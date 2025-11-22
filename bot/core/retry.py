@@ -31,7 +31,7 @@ def _log_before_sleep(retry_state: RetryCallState) -> None:
     try:
         msg = str(exc)
         if "API key is invalid" in msg or 'retCode":10003' in msg:
-            hint = "(Bybit認証エラー: キー不正/環境(testnet/mainnet)不一致の可能性)"
+            hint = "(Bitget認証エラー: キー不正/環境(testnet/mainnet)不一致の可能性)"
     except Exception:
         pass
     logger.warning(

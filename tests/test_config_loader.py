@@ -25,7 +25,7 @@ def test_load_config_env_overrides_yaml(tmp_path: Path, monkeypatch):
                 "  api_key: YAML_KEY",
                 "  api_secret: YAML_SECRET",
                 "exchange:",
-                "  name: bybit",
+                "  name: bitget",
                 '  environment: "testnet"',
                 "risk:",
                 "  max_total_notional: 10000",

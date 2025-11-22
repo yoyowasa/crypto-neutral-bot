@@ -32,13 +32,18 @@ class PaperExchange(ExchangeGateway):
         → 市場データ/補助情報（Funding/ティッカー）を返す data_source と、初期USDT残高を受け取ります。
         """
 
-        self._data = data_source  # BybitGateway 等（REST/WSデータ専用、発注はしない）
+        self._data = data_source  # BitgetGateway 等（REST/WSデータ専用、発注はしない）
         self._oms = None  # 後から bind_oms() でセット
         self._id_seq = 0
 
         # BBO/トレードのスナップショット（perp主体。spotは無ければperpで代用）
         self._bbo: dict[str, tuple[float | None, float | None]] = {}  # symbol -> (bid, ask)
         self._last_price: dict[str, float] = {}  # symbol -> last trade/mid
+        # BitgetGateway 互換の価格スケール/価格ガード/価格キャッシュを簡易に持つ（バックテスト用）
+        self._scale_cache: dict[str, dict[str, float]] = {}
+        self._price_state: dict[str, str] = {}
+        self._last_spot_px: dict[str, float] = {}
+        self._last_index_px: dict[str, float] = {}
 
         # ローカル注文・状態
         self._orders: dict[str, _PaperOrder] = {}  # client_id -> order
@@ -116,7 +121,7 @@ class PaperExchange(ExchangeGateway):
 
     async def get_funding_info(self, symbol: str) -> FundingInfo:
         """これは何をする関数？
-        → Funding 情報は data_source（BybitGateway/CCXT）に委譲します（実発注はしない）。
+        → Funding 情報は data_source（BitgetGateway/CCXT）に委譲します（実発注はしない）。
         """
 
         return await self._data.get_funding_info(symbol)
@@ -225,7 +230,7 @@ class PaperExchange(ExchangeGateway):
 
     async def handle_public_msg(self, msg: dict) -> None:
         """これは何をする関数？
-        → Bybit v5 Public WS からの raw メッセージ（orderbook/publicTrade）を受け取り、BBO/last を更新し、
+        → Bitget v5 Public WS からの raw メッセージ（orderbook/publicTrade）を受け取り、BBO/last を更新し、
           指値の「板内判定→約定」を試みます。
         """
 
@@ -329,7 +334,7 @@ class PaperExchange(ExchangeGateway):
                 except Exception:
                     pass
 
-                # Apply Bybit price scale adjustment from gateway
+                # Apply Bitget price scale adjustment from gateway
                 scale = 1.0
                 data_gateway = getattr(self, "_data", None)
                 try:
@@ -426,10 +431,14 @@ class PaperExchange(ExchangeGateway):
                             except Exception:
                                 px = None
                         elif isinstance(last, dict):
-                            try:
-                                px = float(last.get("price") or last.get("px"))
-                            except Exception:
-                                px = None
+                            val = last.get("price")
+                            if val is None:
+                                val = last.get("px")
+                            if val is not None:
+                                try:
+                                    px = float(val)
+                                except Exception:
+                                    px = None
                         if px is not None:
                             async with self._lock:
                                 self._last_price[inst_id] = px

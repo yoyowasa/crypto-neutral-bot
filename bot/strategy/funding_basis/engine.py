@@ -18,6 +18,13 @@ from bot.risk.limits import PreTradeContext, precheck_open_order
 from .models import Decision, DecisionAction, annualize_rate, net_delta_base, notional_candidate
 
 
+def _safe_float(val: Any) -> float | None:
+    try:
+        return float(val) if val is not None else None
+    except Exception:
+        return None
+
+
 @dataclass(slots=True)
 class _HoldingEntry:
     """単一シンボルの建玉を管理する内部用レコード。"""
@@ -194,7 +201,6 @@ class FundingBasisStrategy:
                     )
 
             return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="ホールド継続", predicted_apr=apr)
-
 
         if self._risk_manager.disable_new_orders:
             return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="リスク管理で新規停止", predicted_apr=apr)
@@ -406,10 +412,10 @@ class FundingBasisStrategy:
     def _market_data_ready(self, symbol: str) -> Tuple[bool, str]:
         """何をする関数？→ 価格スケールと価格ガードの状態を調べ、発注してよいか（READYか）を判定する。"""
 
-        # ゲートウェイ（BybitGatewayなど）を“ていねいに探す”（属性名の揺れを吸収）
+        # ゲートウェイ（BitgetGatewayなど）を“ていねいに探す”（属性名の揺れを吸収）
         gw: Any | None = None
         try:
-            for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex"):
+            for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex"):
                 cand = getattr(self, name, None)
                 if cand is not None and hasattr(cand, "_scale_cache"):
                     gw = cand
@@ -418,7 +424,7 @@ class FundingBasisStrategy:
             if gw is None:
                 oms = getattr(self, "_oms", None)
                 if oms is not None:
-                    for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex", "_ex"):
+                    for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex", "_ex"):
                         cand = getattr(oms, name, None)
                         if cand is None and hasattr(oms, "_ex"):
                             cand = getattr(oms, "_ex", None)
@@ -465,8 +471,8 @@ class FundingBasisStrategy:
                     return float(b[0]), float(b[1])
                 if isinstance(b, dict):
                     return (
-                        float(b.get("bid")) if b.get("bid") is not None else None,
-                        float(b.get("ask")) if b.get("ask") is not None else None,
+                        _safe_float(b.get("bid")),
+                        _safe_float(b.get("ask")),
                     )
             except Exception:
                 pass
@@ -481,15 +487,15 @@ class FundingBasisStrategy:
                         return float(b[0]), float(b[1])
                     if isinstance(b, dict):
                         return (
-                            float(b.get("bid")) if b.get("bid") is not None else None,
-                            float(b.get("ask")) if b.get("ask") is not None else None,
+                            _safe_float(b.get("bid")),
+                            _safe_float(b.get("ask")),
                         )
                 except Exception:
                     pass
 
         # 3) ゲートウェイから拝借（属性名の揺れに対応）
         gw = None
-        for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex"):
+        for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex"):
             cand = getattr(self, name, None)
             if cand is not None:
                 gw = cand
@@ -497,7 +503,7 @@ class FundingBasisStrategy:
         if gw is None:
             oms = getattr(self, "_oms", None)
             if oms is not None:
-                for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex", "_ex"):
+                for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex", "_ex"):
                     cand = getattr(oms, name, None)
                     if cand is None and hasattr(oms, "_ex"):
                         cand = getattr(oms, "_ex", None)
@@ -507,7 +513,7 @@ class FundingBasisStrategy:
         if gw is None:
             oms = getattr(self, "_oms", None)
             if oms is not None:
-                for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex", "_ex"):
+                for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex", "_ex"):
                     cand = getattr(oms, name, None)
                     if cand is None and hasattr(oms, "_ex"):
                         cand = getattr(oms, "_ex", None)
@@ -526,8 +532,8 @@ class FundingBasisStrategy:
                             return float(b[0]), float(b[1])
                         if isinstance(b, dict):
                             return (
-                                float(b.get("bid")) if b.get("bid") is not None else None,
-                                float(b.get("ask")) if b.get("ask") is not None else None,
+                                _safe_float(b.get("bid")),
+                                _safe_float(b.get("ask")),
                             )
                     except Exception:
                         pass
@@ -541,8 +547,8 @@ class FundingBasisStrategy:
                             return float(v[0]), float(v[1])
                         if isinstance(v, dict):
                             return (
-                                float(v.get("bid")) if v.get("bid") is not None else None,
-                                float(v.get("ask")) if v.get("ask") is not None else None,
+                                _safe_float(v.get("bid")),
+                                _safe_float(v.get("ask")),
                             )
                     except Exception:
                         pass
@@ -580,7 +586,7 @@ class FundingBasisStrategy:
     def _round_qty_to_common_step(self, symbol: str, qty: float) -> Optional[float]:
         """何をする関数？→ ゲートウェイの“共通刻み”に合わせて数量を安全側（切り下げ）で丸める。"""
         gw = None
-        for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex"):
+        for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex"):
             cand = getattr(self, name, None)
             if cand is not None:
                 gw = cand
@@ -597,7 +603,7 @@ class FundingBasisStrategy:
     def _min_limits_ok(self, symbol: str, qty: float, anchor_px: Optional[float]) -> Tuple[bool, str]:
         """何をする関数？→ 両足の“最小数量/最小名目額”を同時に満たすか判定し、理由を返す。"""
         gw = None
-        for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex"):
+        for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex"):
             cand = getattr(self, name, None)
             if cand is not None and hasattr(cand, "_scale_cache"):
                 gw = cand
@@ -605,7 +611,7 @@ class FundingBasisStrategy:
         if gw is None:
             oms = getattr(self, "_oms", None)
             if oms is not None:
-                for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex", "_ex"):
+                for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex", "_ex"):
                     cand = getattr(oms, name, None)
                     if cand is None and hasattr(oms, "_ex"):
                         cand = getattr(oms, "_ex", None)
@@ -638,7 +644,7 @@ class FundingBasisStrategy:
         for owner in (self, getattr(self, "_oms", None)):
             if owner is None:
                 continue
-            for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex", "_ex"):
+            for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex", "_ex"):
                 cand = getattr(owner, name, None)
                 if cand is not None:
                     gw = cand
@@ -647,10 +653,11 @@ class FundingBasisStrategy:
                 break
         if gw is None:
             return None
-        # BybitGateway が保持する最新の現物/インデックス価格を参照（どちらかあれば採用）
+        # BitgetGateway が保持する最新の現物/インデックス価格を参照（どちらかあれば採用）
         spot_px = getattr(gw, "_last_spot_px", {}).get(symbol) if hasattr(gw, "_last_spot_px") else None
         index_px = getattr(gw, "_last_index_px", {}).get(symbol) if hasattr(gw, "_last_index_px") else None
-        return float(spot_px or index_px) if (spot_px or index_px) else None
+        val = spot_px or index_px
+        return float(val) if val is not None else None
 
     def _compute_open_base_qty(self, symbol: str, notional_usd: float) -> Optional[float]:
         """何をする関数？→ OPEN時の両足に共通で使う“ベース数量”を、アンカー価格で1回だけ計算する。"""

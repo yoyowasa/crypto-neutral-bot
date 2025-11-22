@@ -2,7 +2,7 @@
 
 最小の“見える化”として、以下を提供します。
 - bbo_valid: BBO が正常か（bid/ask > 0 かつ bid < ask）
-- price_scale_ready: Bybit ゲートウェイの価格スケールが準備完了か
+- price_scale_ready: Bitget ゲートウェイの価格スケールが準備完了か
 - price_state: 価格ガードの現在状態（READY/FROZEN/NO_ANCHOR/UNKNOWN）
 """
 
@@ -31,8 +31,8 @@ def _is_bbo_valid(bid: Optional[float], ask: Optional[float]) -> bool:
     return bid_f < ask_f  # 同値や逆転は不正とみなす
 
 
-def _get_bybit_gateway(engine: Any) -> Optional[Any]:
-    """何をする関数？→ Engineの中からBybitゲートウェイ(価格スケールや状態を持つ)を“ていねいに探す”。
+def _get_bitget_gateway(engine: Any) -> Optional[Any]:
+    """何をする関数？→ Engineの中からBitgetゲートウェイ(価格スケールや状態を持つ)を“ていねいに探す”。
     よくある置き場所を順に探す（どれも無ければ None）。
     """
 
@@ -42,7 +42,7 @@ def _get_bybit_gateway(engine: Any) -> Optional[Any]:
     if hasattr(engine, "_scale_cache") and hasattr(engine, "_price_state"):
         return engine
     # よくある属性名を順に見る
-    for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex", "data_ex", "price_source"):
+    for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex", "data_ex", "price_source"):
         gw = getattr(engine, name, None)
         if gw is not None and hasattr(gw, "_scale_cache"):
             return gw
@@ -53,7 +53,7 @@ def _scale_ready_for_symbol(gw: Any, symbol: str) -> bool:
     """何をする関数？→ シンボルの“価格スケール準備OKか”をゲートウェイのキャッシュから調べる。"""
 
     try:
-        # BybitGateway._scale_cache には {sym: {"priceScale": int, ...}} が入る
+        # BitgetGateway._scale_cache には {sym: {"priceScale": int, ...}} が入る
         info = getattr(gw, "_scale_cache", {}).get(symbol) or {}
         return info.get("priceScale") is not None
     except Exception:
@@ -173,7 +173,7 @@ def _market_data_ready_for_ops(
             pass
 
     # 2) フォールバック：ゲートウェイから状態を読む
-    gw = _get_bybit_gateway(engine)
+    gw = _get_bitget_gateway(engine)
     if not gw:
         return False, "no_gateway"
 
@@ -201,7 +201,7 @@ async def export_ops_check(engine: Any, symbols: list[str]) -> list[dict]:
     """
 
     rows: list[dict] = []
-    gw = _get_bybit_gateway(engine)
+    gw = _get_bitget_gateway(engine)
 
     for sym in symbols:
         # 価格・Funding の取得（失敗しても None 埋め）
@@ -272,8 +272,8 @@ async def export_ops_check(engine: Any, symbols: list[str]) -> list[dict]:
 
 
 def _get_exchange_gateway(engine: Any) -> Optional[Any]:
-    """汎用のゲートウェイ探索ヘルパー（Bybit/Bitget 等）。
-    実装は後方互換性のため _get_bybit_gateway をそのまま利用する。
+    """汎用のゲートウェイ探索ヘルパー（Bitget/Bitget 等）。
+    実装は後方互換性のため _get_bitget_gateway をそのまま利用する。
     """
 
-    return _get_bybit_gateway(engine)
+    return _get_bitget_gateway(engine)

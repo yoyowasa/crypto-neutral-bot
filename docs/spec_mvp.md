@@ -1,9 +1,9 @@
-# Bybit デルタ・ニュートラルBOT — MVP仕様（STEP0）
+# Bitget デルタ・ニュートラルBOT — MVP仕様（STEP0）
 （この文書は開発の「よりどころ」です。あとで迷わないように、MVPの範囲・安全装置・KPI・停止/撤退条件をここで固定します）
 
 ## 前提
 - 開発環境：Python 3.11 / VSCode / Poetry（Docker 不使用）
-- 取引所：Bybit  
+- 取引所：Bitget  
   - 口座：UTA（Unified Trading Account）を使う想定。**必須かどうかは口座設定に依存（不明）**
   - APIの細かいフィールド名・エンドポイント等は **正式ドキュメントで最終確認** し、実装ではラッパー層で吸収  
     （例：`TODO: 要API確認` とコメントを付ける）
@@ -89,12 +89,12 @@
 
 ---
 
-## Bybit 特有の注意（MVP時点の扱い）
-- **API種別**：Bybit v5 REST/WS を使う想定  
+## Bitget 特有の注意（MVP時点の扱い）
+- **API種別**：Bitget v5 REST/WS を使う想定  
   - **pybit の v5対応が不十分な場合**  
-    - REST：`ccxt.bybit` を利用  
+    - REST：`ccxt.bitget` を利用  
     - WS：`websockets` で自前実装（チャネル名・署名方式は **必ず公式ドキュメント確認**）
-- **クライアント注文ID**：Bybit の `orderLinkId` を利用予定（**正式名/制約は要確認**）
+- **クライアント注文ID**：Bitget の `orderLinkId` を利用予定（**正式名/制約は要確認**）
 - **Funding情報**：`predicted funding rate` と `next funding time` を提供するAPIがある想定（**要確認**）
 - **記号正規化**：v5の正式シンボルは **インストルメント情報APIから取得して保存**  
   例：`SymbolMap{ "BTC": {"spot":"BTCUSDT", "perp":"BTCUSDT"} }`（**実際の表記はAPIで要確認**）
@@ -123,13 +123,13 @@
 
 ## 受入条件（STEP0 完了の判定）
 - `docs/spec_mvp.md` が **作成済み** で、以下が **記述されている**：
-  - 取引所（Bybit/UTA前提の注意）
+  - 取引所（Bitget/UTA前提の注意）
   - 戦略MVPの方針（Funding/ベーシス、デルタ中立、建て/解消/再ヘッジ）
   - 運用KPI（PnL、DD、β、Funding寄与）
   - 停止条件（WS断、遅延、損失、デルタ上限、API異常、Funding符号反転）
   - 取扱銘柄（BTCUSDT, ETHUSDT）
   - 上限（総名目/銘柄別/ハードリミット/手数料）
-  - Bybit特有の注意・`TODO: 要API確認` の明示
+  - Bitget特有の注意・`TODO: 要API確認` の明示
   - 撤退基準（継続/中止の線引き）
 
 

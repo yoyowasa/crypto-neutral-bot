@@ -29,14 +29,14 @@ class OrderRequest(BaseModel):
     reduce_only: bool = False
     post_only: bool = False
     client_id: str | None = None  # legacy client id used by OMS
-    client_order_id: str | None = None  # exchange client order id (Bybit: orderLinkId)
+    client_order_id: str | None = None  # exchange client order id (Bitget: clientOid)
 
 
 class Order(BaseModel):
     symbol: str | None = None
     order_id: str
     client_id: str | None
-    client_order_id: str | None = None  # exchange client order id (Bybit: orderLinkId)
+    client_order_id: str | None = None  # exchange client order id (Bitget: clientOid)
     status: str  # "new","partially_filled","filled","canceled","rejected"
     filled_qty: float
     avg_fill_price: float | None
@@ -47,4 +47,4 @@ class FundingInfo(BaseModel):
     current_rate: float | None  # current (ticker-based)
     predicted_rate: float | None  # predicted (for next settlement)
     next_funding_time: datetime | None
-    funding_interval_hours: int | None = None  # Bybit v5 ticker 'fundingIntervalHour' if present
+    funding_interval_hours: int | None = None  # Funding interval hours if present

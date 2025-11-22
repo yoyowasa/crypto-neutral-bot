@@ -10,6 +10,7 @@ from decimal import Decimal  # 価格のズレをbpsで計算するために使�
 from typing import (
     Any,
     Dict,  # クールダウン解除(出口)ログ用の状態フラグ型
+    Optional,
     cast,
 )
 
@@ -121,7 +122,7 @@ class OmsEngine:
         self._metrics_chase_amend_period: dict[str, int] = {}
         self._metrics_cooldown_enter_period: dict[str, int] = {}
 
-        # 起動時に1回だけBybit認証を確認し、結果を保持する（監視のみ運転の判定に使う）
+        # 起動時に1回だけBitget認証を確認し、結果を保持する（監視のみ運転の判定に使う）
         self.auth_ok: bool = True
         self.auth_message: str = ""
         try:
@@ -163,12 +164,12 @@ class OmsEngine:
 
     # ---------- 発注/取消API ----------
 
-    async def submit(self, req: OrderRequest) -> Order:
+    async def submit(self, req: OrderRequest) -> Optional[Order]:
         """これは何をする関数？
         → 注文を取引所へ発注し、OMSの追跡に登録します（idempotencyのためclient_id必須）。
         """
 
-        # Bybit の client order id（orderLinkId）を未指定ならここで採番
+        # Bitget の client order id（orderLinkId）を未指定ならここで採番
         try:
             import uuid
 
@@ -709,7 +710,7 @@ class OmsEngine:
     async def reconcile_inflight_open_orders(self, symbols: list[str]) -> None:
         """取引所に残る open 注文の client_order_id を復元して二重発注を防ぐ。
 
-        - Bybit v5 では /v5/order/realtime の各要素に orderLinkId が含まれる。
+        - Bitget v5 では /v5/order/realtime の各要素に orderLinkId が含まれる。
         - 互換のため、Order オブジェクトの場合は client_order_id もしくは client_id を参照する。
         """
 
