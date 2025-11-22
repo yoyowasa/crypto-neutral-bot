@@ -771,7 +771,7 @@ def _precheck_api_key_from_opscheck(path: str = "ops-check.json") -> bool:
         except Exception:
             pass
 
-            if isinstance(data, list):
+    if isinstance(data, list):
         for row in data:
             if isinstance(row, dict):
                 _scan_entry(row)
