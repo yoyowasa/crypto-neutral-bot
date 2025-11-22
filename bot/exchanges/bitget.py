@@ -393,44 +393,60 @@ class BitgetGateway(ExchangeGateway):
             prec = perp.get("precision") or {}
             limits = perp.get("limits") or {}
             # 価格スケール
-            price_step = prec.get("price")
-            if price_step not in (None, 0):
+            price_step_raw = prec.get("price")
+            if price_step_raw not in (None, 0):
                 try:
+                    price_step = float(price_step_raw)
                     scale = max(0, -int(round(Decimal(str(price_step)).log10())))
                 except Exception:
                     scale = None
                 if scale is not None:
                     info["priceScale"] = float(scale)
-                    info["tickSize"] = float(price_step)
+                    info["tickSize"] = price_step
             # 量スケール
-            qty_step = prec.get("amount") or (limits.get("amount") or {}).get("min")
-            if qty_step not in (None, 0):
-                info["qtyStep_perp"] = float(qty_step)
-                info.setdefault("minQty_perp", float(qty_step))
-            min_notional = (limits.get("cost") or {}).get("min")
-            if min_notional not in (None, 0):
-                info["minNotional_perp"] = float(min_notional)
+            qty_step_raw = prec.get("amount") or (limits.get("amount") or {}).get("min")
+            if qty_step_raw not in (None, 0):
+                try:
+                    qty_step = float(qty_step_raw)
+                    info["qtyStep_perp"] = qty_step
+                    info.setdefault("minQty_perp", qty_step)
+                except Exception:
+                    pass
+            min_notional_raw = (limits.get("cost") or {}).get("min")
+            if min_notional_raw not in (None, 0):
+                try:
+                    info["minNotional_perp"] = float(min_notional_raw)
+                except Exception:
+                    pass
 
         # spot 側
         if spot:
             prec = spot.get("precision") or {}
             limits = spot.get("limits") or {}
-            price_step = prec.get("price")
-            if price_step not in (None, 0):
+            price_step_raw = prec.get("price")
+            if price_step_raw not in (None, 0):
                 try:
+                    price_step = float(price_step_raw)
                     scale = max(0, -int(round(Decimal(str(price_step)).log10())))
                 except Exception:
                     scale = None
                 if scale is not None and "priceScale" not in info:
                     info["priceScale"] = float(scale)
-                    info["tickSize"] = float(price_step)
-            qty_step = prec.get("amount") or (limits.get("amount") or {}).get("min")
-            if qty_step not in (None, 0):
-                info["qtyStep_spot"] = float(qty_step)
-                info.setdefault("minQty_spot", float(qty_step))
-            min_notional = (limits.get("cost") or {}).get("min")
-            if min_notional not in (None, 0):
-                info["minNotional_spot"] = float(min_notional)
+                    info["tickSize"] = price_step
+            qty_step_raw = prec.get("amount") or (limits.get("amount") or {}).get("min")
+            if qty_step_raw not in (None, 0):
+                try:
+                    qty_step = float(qty_step_raw)
+                    info["qtyStep_spot"] = qty_step
+                    info.setdefault("minQty_spot", qty_step)
+                except Exception:
+                    pass
+            min_notional_raw = (limits.get("cost") or {}).get("min")
+            if min_notional_raw not in (None, 0):
+                try:
+                    info["minNotional_spot"] = float(min_notional_raw)
+                except Exception:
+                    pass
 
         if info:
             self._scale_cache[core] = info
@@ -794,8 +810,18 @@ class BitgetGateway(ExchangeGateway):
         if time_in_force:
             params["timeInForce"] = time_in_force
 
-        amount = float(new_qty) if new_qty is not None else None
-        price = float(new_price) if new_price is not None else None
+        amount = None
+        if new_qty is not None and isinstance(new_qty, (int, float, str)):
+            try:
+                amount = float(new_qty)
+            except Exception:
+                amount = None
+        price = None
+        if new_price is not None and isinstance(new_price, (int, float, str)):
+            try:
+                price = float(new_price)
+            except Exception:
+                price = None
 
         order_side = (side or "buy").lower()
         order_type = "limit"  # 価格変更の想定なので limit 固定

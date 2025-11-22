@@ -391,10 +391,14 @@ async def _main_async(
     data_ex._bbo_max_age_ms = cfg.exchange.bbo_max_age_ms  # BBO鮮度ガード（STEP28）
     data_ex._rest_max_concurrency = cfg.exchange.rest_max_concurrency  # REST同時実行上限（STEP29）
     data_ex._rest_semaphore = asyncio.Semaphore(data_ex._rest_max_concurrency)  # 新しい上限でセマフォを再構築
-    data_ex._rest_cb_fail_threshold = cfg.exchange.rest_cb_fail_threshold  # サーキット連続失敗回数（STEP31）
-    data_ex._rest_cb_open_seconds = cfg.exchange.rest_cb_open_seconds  # サーキット休止秒（STEP31）
-    data_ex._instrument_info_ttl_s = cfg.exchange.instrument_info_ttl_s  # instruments-infoの自動リフレッシュ間隔（秒）
-    data_ex._price_dev_bps_limit = cfg.risk.price_dev_bps_limit  # 価格逸脱ガード[bps]（STEP34）
+    if hasattr(data_ex, "_rest_cb_fail_threshold"):
+        data_ex._rest_cb_fail_threshold = cfg.exchange.rest_cb_fail_threshold  # サーキット連続失敗回数（STEP31）
+    if hasattr(data_ex, "_rest_cb_open_seconds"):
+        data_ex._rest_cb_open_seconds = cfg.exchange.rest_cb_open_seconds  # サーキット休止秒（STEP31）
+    if hasattr(data_ex, "_instrument_info_ttl_s"):
+        data_ex._instrument_info_ttl_s = cfg.exchange.instrument_info_ttl_s  # instruments-infoの自動リフレッシュ間隔（秒）
+    if hasattr(data_ex, "_price_dev_bps_limit"):
+        data_ex._price_dev_bps_limit = cfg.risk.price_dev_bps_limit  # 価格逸脱ガード[bps]（STEP34）
 
     # 健診モード：各シンボルの Funding / BBO / 認証REST（open orders）を点検して終了する
     if ops_check:
@@ -597,12 +601,14 @@ async def _main_async(
         trade_ex._bbo_max_age_ms = cfg.exchange.bbo_max_age_ms  # BBO鮮度ガード（STEP28）
         trade_ex._rest_max_concurrency = cfg.exchange.rest_max_concurrency  # REST同時実行上限（STEP29）
         trade_ex._rest_semaphore = asyncio.Semaphore(trade_ex._rest_max_concurrency)  # 新しい上限でセマフォを再構築
-        trade_ex._rest_cb_fail_threshold = cfg.exchange.rest_cb_fail_threshold  # サーキット連続失敗回数（STEP31）
-        trade_ex._rest_cb_open_seconds = cfg.exchange.rest_cb_open_seconds  # サーキット休止秒（STEP31）
-        trade_ex._instrument_info_ttl_s = (
-            cfg.exchange.instrument_info_ttl_s
-        )  # instruments-infoの自動リフレッシュ間隔（秒）
-        trade_ex._price_dev_bps_limit = cfg.risk.price_dev_bps_limit  # 価格逸脱ガード[bps]（STEP34）
+        if hasattr(trade_ex, "_rest_cb_fail_threshold"):
+            trade_ex._rest_cb_fail_threshold = cfg.exchange.rest_cb_fail_threshold  # サーキット連続失敗回数（STEP31）
+        if hasattr(trade_ex, "_rest_cb_open_seconds"):
+            trade_ex._rest_cb_open_seconds = cfg.exchange.rest_cb_open_seconds  # サーキット休止秒（STEP31）
+        if hasattr(trade_ex, "_instrument_info_ttl_s"):
+            trade_ex._instrument_info_ttl_s = cfg.exchange.instrument_info_ttl_s  # instruments-infoの自動リフレッシュ間隔（秒）
+        if hasattr(trade_ex, "_price_dev_bps_limit"):
+            trade_ex._price_dev_bps_limit = cfg.risk.price_dev_bps_limit  # 価格逸脱ガード[bps]（STEP34）
         oms = OmsEngine(ex=trade_ex, repo=repo, cfg=None)
         # --- 設定の適用：OMS（WS古さブロック、STEP32） ---
         oms._ws_stale_block_ms = cfg.risk.ws_stale_block_ms
@@ -708,11 +714,15 @@ async def _main_async(
     finally:
         # ccxt リソース解放
         try:
-            await trade_ex.close()  # ccxt async close で警告抑制
+            close_fn = getattr(trade_ex, "close", None)
+            if callable(close_fn):
+                await close_fn()  # ccxt async close で警告抑制
         except Exception:
             pass
         try:
-            await data_ex.close()
+            close_fn = getattr(data_ex, "close", None)
+            if callable(close_fn):
+                await close_fn()
         except Exception:
             pass
         if flatten_on_exit:
