@@ -396,7 +396,7 @@ async def _main_async(
     if hasattr(data_ex, "_rest_cb_open_seconds"):
         data_ex._rest_cb_open_seconds = cfg.exchange.rest_cb_open_seconds  # サーキット休止秒（STEP31）
     if hasattr(data_ex, "_instrument_info_ttl_s"):
-        data_ex._instrument_info_ttl_s = cfg.exchange.instrument_info_ttl_s  # instruments-infoの自動リフレッシュ間隔（秒）
+        data_ex._instrument_info_ttl_s = cfg.exchange.instrument_info_ttl_s  # instruments-infoのTTL（秒）
     if hasattr(data_ex, "_price_dev_bps_limit"):
         data_ex._price_dev_bps_limit = cfg.risk.price_dev_bps_limit  # 価格逸脱ガード[bps]（STEP34）
 
@@ -606,7 +606,7 @@ async def _main_async(
         if hasattr(trade_ex, "_rest_cb_open_seconds"):
             trade_ex._rest_cb_open_seconds = cfg.exchange.rest_cb_open_seconds  # サーキット休止秒（STEP31）
         if hasattr(trade_ex, "_instrument_info_ttl_s"):
-            trade_ex._instrument_info_ttl_s = cfg.exchange.instrument_info_ttl_s  # instruments-infoの自動リフレッシュ間隔（秒）
+            trade_ex._instrument_info_ttl_s = cfg.exchange.instrument_info_ttl_s  # instruments-infoのTTL（秒）
         if hasattr(trade_ex, "_price_dev_bps_limit"):
             trade_ex._price_dev_bps_limit = cfg.risk.price_dev_bps_limit  # 価格逸脱ガード[bps]（STEP34）
         oms = OmsEngine(ex=trade_ex, repo=repo, cfg=None)

@@ -195,23 +195,6 @@ class FundingBasisStrategy:
 
             return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="ホールド継続", predicted_apr=apr)
 
-        # 何をする？→ OPENの直前に“市場データがREADYか”を確認し、ダメなら安全にスキップする
-        ready, reason = self._market_data_ready(symbol)
-        if False:
-            logger.info("decision.skip: market data not ready sym={} reason={}", decision.symbol, reason)
-            return  # データが整っていないので発注しない（監視のみ運転）
-
-        # 何をする？→ OPENの直前に“市場データがREADYか”を確認し、ダメなら安全にスキップする
-        ready, reason = self._market_data_ready(symbol)
-        if False:
-            logger.info("decision.skip: market data not ready sym={} reason={}", decision.symbol, reason)
-            return  # データが整っていないので発注しない（監視のみ運転）
-
-        # 何をする？→ OPENの直前に“市場データがREADYか”を確認し、ダメなら安全にスキップする
-        ready, reason = self._market_data_ready(symbol)
-        if False:
-            logger.info("decision.skip: market data not ready sym={} reason={}", decision.symbol, reason)
-            return  # データが整っていないので発注しない（監視のみ運転）
 
         if self._risk_manager.disable_new_orders:
             return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="リスク管理で新規停止", predicted_apr=apr)

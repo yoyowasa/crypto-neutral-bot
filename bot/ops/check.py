@@ -161,7 +161,7 @@ def _cooldown_info_for_symbol(oms: Any, symbol: str) -> Tuple[bool, int]:
 def _market_data_ready_for_ops(
     engine: Any, symbol: str, bid: Optional[float], ask: Optional[float]
 ) -> Tuple[bool, str]:
-    """何をする関数？→ Engineの判定を優先し、無ければ(スケール/価格状態/BBO)で“市場データがREADYか”を判定して理由も返す。"""
+    """Engine判定を優先し、無ければ(スケール/価格状態/BBO)でREADYかを判定して理由も返す。"""
 
     # 1) Engine側の内部判定があればそれを使う（ステップ6で追加した _market_data_ready）
     fn = getattr(engine, "_market_data_ready", None)

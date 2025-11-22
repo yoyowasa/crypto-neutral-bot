@@ -38,7 +38,9 @@ logger = logging.getLogger(__name__)  # このモジュール用のロガー
 
 
 def _format_guard_context(_ldict: dict) -> dict:
-    """guard.skip 用の要約コンテキストを生成して安全に返す。"""
+    """
+# ruff: noqa: E402
+guard.skip 用の要約コンテキストを生成して安全に返す。"""
 
     keys = (
         "ready_count",
@@ -63,7 +65,6 @@ from bot.core.time import (
     parse_exchange_ts,
     utc_now,  # BBOの鮮度判定に使用
 )
-
 from .base import ExchangeGateway
 from .types import Balance, FundingInfo, Order, OrderRequest, Position
 
@@ -1010,11 +1011,7 @@ class BybitGateway(ExchangeGateway):
             return float(max(q_spot, q_perp))
 
     def _try_prime_scale(self, symbol: str) -> bool:
-        """何をする関数？→ スケール未準備のシンボルに対して、Bybit REST から銘柄メタを取得し priceScale/tickSize をキャッシュする。
-
-        - 60秒以内の再試行はスキップ（API連打防止）
-        - v5 instruments-info を category=linear / spot の順で試行
-        - 取得に成功すると _update_scale_cache() で priceScale/tickSize を反映
+        """スケール未準備のシンボルに対し、Bybit RESTでメタを取得しpriceScale/tickSizeをキャッシュする。
         """
 
         now = time.time()

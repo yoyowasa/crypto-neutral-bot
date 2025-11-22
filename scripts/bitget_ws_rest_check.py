@@ -10,6 +10,8 @@ from __future__ import annotations
 - `order_id` / `client_order_id` に一致する REST 側の注文情報と、
   `logs/trades-*.jsonl` 内の trade_fill レコードを並べてログ出力する。
 """
+# ruff: noqa: E402
+
 
 import argparse
 import asyncio
