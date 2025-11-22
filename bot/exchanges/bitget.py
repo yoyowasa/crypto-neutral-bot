@@ -161,7 +161,10 @@ async def _bitget_subscribe_private_impl(
                             try:
                                 for row in rows_compat:
                                     loguru_logger.info(
-                                        "bitget.ws.private.orders raw: oid={} cfq={} avg_px={} fee={} fee_ccy={} exec_type={} liq={}",
+                                        (
+                                            "bitget.ws.private.orders raw: "
+                                            "oid={} cfq={} avg_px={} fee={} fee_ccy={} exec_type={} liq={}"
+                                        ),
                                         row.get("orderId"),
                                         row.get("cumExecQty"),
                                         row.get("avgPrice"),

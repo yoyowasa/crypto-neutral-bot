@@ -10,29 +10,6 @@ from typing import Any
 
 from loguru import logger
 
-_DEBUG_PRIVATE_WS: bool = False  # Private WS �̃f�o�u���O���D�g���q�Ǘ�
-
-
-def _format_guard_context(_ldict: dict) -> dict:
-    """guard.skip用の文脈を安全に抽出して返す。"""
-
-    keys = (
-        "ready_count",
-        "ready_required",
-        "cooldown_until",
-        "next_ready_at",
-        "wait_ms",
-        "since_prime_ms",
-        "since_tick_ms",
-    )
-    ctx = {}
-    for key in keys:
-        value = _ldict.get(key)
-        if value is not None:
-            ctx[key] = value
-    return ctx
-
-
 from bot.config.loader import load_config
 from bot.core.errors import ConfigError  # 本番禁止のときは起動を止めるために使う
 from bot.core.logging import setup_logging
@@ -57,6 +34,28 @@ from bot.ops.check import (
 )
 from bot.risk.guards import RiskManager
 from bot.strategy.funding_basis.engine import FundingBasisStrategy
+
+_DEBUG_PRIVATE_WS: bool = False  # Private WS のデバッグログ出力フラグ
+
+
+def _format_guard_context(_ldict: dict) -> dict:
+    """guard.skip用の文脈を安全に抽出して返す。"""
+
+    keys = (
+        "ready_count",
+        "ready_required",
+        "cooldown_until",
+        "next_ready_at",
+        "wait_ms",
+        "since_prime_ms",
+        "since_tick_ms",
+    )
+    ctx = {}
+    for key in keys:
+        value = _ldict.get(key)
+        if value is not None:
+            ctx[key] = value
+    return ctx
 
 # Bybit v5 -> OMS ステータス正規化対応表
 STATUS_MAP_EXCHANGE_TO_OMS = {
@@ -312,17 +311,12 @@ async def _strategy_step_once(
         # 初期スケール未確定時は評価/発注をスキップ（2回連続で正規化確認）
         try:
             if hasattr(funding_source, "is_price_scale_ready") and not funding_source.is_price_scale_ready(sym, 2):
-                try:  # 何をする: priceScale即時プライムの呼び出し失敗で戦略ループが止まらないように保護し、成否を必ずログに残す
-                    res = getattr(funding_source, "_try_prime_scale", lambda *_: None)(
-                        sym
-                    )  # 何をする: instruments-info によるpriceScaleプライミングを試行
-                    logger.info(
-                        "scale.prime.call sym={} result={}", sym, res
-                    )  # 何をする: 呼び出しが実行された事実と戻り値を可視化（Noneも記録）
+                # instruments-info を用いた priceScale プライミングを試行し、結果をログに残す
+                try:
+                    res = getattr(funding_source, "_try_prime_scale", lambda *_: None)(sym)
+                    logger.info("scale.prime.call sym={} result={}", sym, res)
                 except Exception as e:
-                    logger.exception(
-                        "scale.prime.error sym=%s reason=%s", sym, e
-                    )  # 何をする: 例外内容を記録しつつ、ここではループを継続して無限スキップを解消する足がかりにする
+                    logger.exception("scale.prime.error sym=%s reason=%s", sym, e)
                 reason = "price_scale_not_ready"
                 logger.info(
                     "guard.skip sym={} reason={} ctx={}",
@@ -777,39 +771,7 @@ def _precheck_api_key_from_opscheck(path: str = "ops-check.json") -> bool:
         except Exception:
             pass
 
-        # Bitget mix books/books1/books5/books15 形式の BBO も BitgetGateway 側キャッシュに反映する
-        try:
-            arg = msg.get("arg") or {}
-            channel = (arg.get("channel") or "").lower()
-            if channel in {"books", "books1", "books5", "books15"}:
-                data_obj = msg.get("data") or []
-                item = None
-                if isinstance(data_obj, list):
-                    item = data_obj[0] if data_obj else None
-                elif isinstance(data_obj, dict):
-                    item = data_obj
-                if item:
-                    bids = item.get("bids") or []
-                    asks = item.get("asks") or []
-                    bid = None
-                    ask = None
-                    if isinstance(bids, list) and bids:
-                        try:
-                            bid = float(bids[0][0])
-                        except Exception:
-                            bid = None
-                    if isinstance(asks, list) and asks:
-                        try:
-                            ask = float(asks[0][0])
-                        except Exception:
-                            ask = None
-                    sym = arg.get("instId") or item.get("instId")
-                    if sym and (bid is not None or ask is not None):
-                        data_ex.update_bbo(sym, bid, ask, item.get("ts"))
-        except Exception:
-            pass
-
-    if isinstance(data, list):
+            if isinstance(data, list):
         for row in data:
             if isinstance(row, dict):
                 _scan_entry(row)
