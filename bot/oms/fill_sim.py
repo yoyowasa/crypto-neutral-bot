@@ -271,17 +271,44 @@ class PaperExchange(ExchangeGateway):
                         except Exception:
                             pass
 
-                # Prime price-scale once using REST ticker (normalizes testnet scale)
+                # Prime price-scale once using REST ticker (normalize testnet scale)
                 try:
                     data_gateway = getattr(self, "_data", None)
                     price_scale = getattr(data_gateway, "_price_scale", {}) if data_gateway else {}
                     needs_prime = False
                     if isinstance(price_scale, dict):
                         needs_prime = price_scale.get(symbol) in (None, 1.0)
-                    if needs_prime and data_gateway is not None and hasattr(data_gateway, "get_ticker"):
-                        # Prime twice to satisfy readiness (two consecutive normalized reads)
-                        await data_gateway.get_ticker(symbol)
-                        await data_gateway.get_ticker(symbol)
+                    if needs_prime and data_gateway is not None:
+                        # Use spot as anchor and current raw mid to derive scale
+                        anchor_spot = None
+                        try:
+                            anchor_spot = await self.get_ticker(f"{symbol}_SPOT")
+                        except Exception:
+                            anchor_spot = None
+                        ref_raw = None
+                        try:
+                            if bid is not None and ask is not None:
+                                ref_raw = (float(bid) + float(ask)) / 2.0
+                            elif bid is not None:
+                                ref_raw = float(bid)
+                            elif ask is not None:
+                                ref_raw = float(ask)
+                        except Exception:
+                            ref_raw = None
+                        if anchor_spot and ref_raw and ref_raw > 0:
+                            ratio = ref_raw / anchor_spot
+                            if ratio > 2.0 or ratio < 0.5:
+                                try:
+                                    if hasattr(data_gateway, "_price_scale") and isinstance(
+                                        data_gateway._price_scale, dict
+                                    ):
+                                        data_gateway._price_scale[symbol] = float(anchor_spot) / float(ref_raw)
+                                except Exception:
+                                    pass
+                        # Also call gateway.get_ticker twice to update readiness counters
+                        if hasattr(data_gateway, "get_ticker"):
+                            await data_gateway.get_ticker(symbol)
+                            await data_gateway.get_ticker(symbol)
                 except Exception:
                     pass
 
@@ -349,6 +376,65 @@ class PaperExchange(ExchangeGateway):
                 price *= scale
                 async with self._lock:
                     self._last_price[symbol] = price
+
+        # Bitget Public WS の場合（topic が空で arg.channel が使われる）
+        if not topic:
+            try:
+                arg = msg.get("arg") or {}
+                channel = (arg.get("channel") or "").lower()
+                inst_id = arg.get("instId") or arg.get("instID")
+                # order book: books/books1/books5/books15
+                if channel in {"books", "books1", "books5", "books15"} and inst_id:
+                    data_obj = msg.get("data") or []
+                    item = None
+                    if isinstance(data_obj, list):
+                        item = data_obj[0] if data_obj else None
+                    elif isinstance(data_obj, dict):
+                        item = data_obj
+                    if item:
+                        bids = item.get("bids") or []
+                        asks = item.get("asks") or []
+                        bid = None
+                        ask = None
+                        if isinstance(bids, list) and bids:
+                            try:
+                                bid = float(bids[0][0])
+                            except Exception:
+                                bid = None
+                        if isinstance(asks, list) and asks:
+                            try:
+                                ask = float(asks[0][0])
+                            except Exception:
+                                ask = None
+                        async with self._lock:
+                            prev_bid, prev_ask = self._bbo.get(inst_id, (None, None))
+                            self._bbo[inst_id] = (
+                                bid if bid is not None else prev_bid,
+                                ask if ask is not None else prev_ask,
+                            )
+                        # Bitget でも同様に、orderbook 更新をトリガに Limit の約定判定を行う
+                        await self._try_fill_limits(inst_id)
+                # trade: data は [ [ts, px, sz, side], ... ]
+                elif channel == "trade" and inst_id:
+                    trades = msg.get("data") or []
+                    if trades:
+                        px = None
+                        last = trades[-1]
+                        if isinstance(last, list) and len(last) >= 2:
+                            try:
+                                px = float(last[1])
+                            except Exception:
+                                px = None
+                        elif isinstance(last, dict):
+                            try:
+                                px = float(last.get("price") or last.get("px"))
+                            except Exception:
+                                px = None
+                        if px is not None:
+                            async with self._lock:
+                                self._last_price[inst_id] = px
+            except Exception:
+                pass
 
     # ---------- 内部：約定・ポジション/残高反映 ----------
 

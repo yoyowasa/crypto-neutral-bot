@@ -7,7 +7,11 @@ import os
 import random
 import time
 from decimal import Decimal  # 価格のズレをbpsで計算するために使用
-from typing import Any, cast
+from typing import (
+    Any,
+    Dict,  # クールダウン解除(出口)ログ用の状態フラグ型
+    cast,
+)
 
 from loguru import logger
 
@@ -101,6 +105,9 @@ class OmsEngine:
         self._symbol_cooldown_ms: int = 120_000
         self._reject_window: dict[str, tuple[int, int]] = {}
         self._symbol_cooldown_until: dict[str, int] = {}
+        self._cooldown_active: Dict[str, bool] = (
+            {}
+        )  # 何をする？→ 現在クールダウン中かのフラグ（exitを一度だけ出すため）
         # PostOnly追従（アメンド）の頻度制御メモ
         self._last_amend_ms: dict[str, int] = {}
         self._amend_count_minute: dict[str, tuple[int, int]] = {}
@@ -113,6 +120,22 @@ class OmsEngine:
         self._metrics_cooldown_enter_total: dict[str, int] = {}
         self._metrics_chase_amend_period: dict[str, int] = {}
         self._metrics_cooldown_enter_period: dict[str, int] = {}
+
+        # 起動時に1回だけBybit認証を確認し、結果を保持する（監視のみ運転の判定に使う）
+        self.auth_ok: bool = True
+        self.auth_message: str = ""
+        try:
+            check = getattr(self._ex, "check_auth", None)
+            if callable(check):
+                ok, msg = check()
+                self.auth_ok = bool(ok)
+                self.auth_message = str(msg or "")
+                if not self.auth_ok:
+                    logging.getLogger(__name__).warning("auth.preflight.failed: %s", self.auth_message)
+        except Exception as e:  # 例外はネットワーク/署名/時刻ずれ等を含む
+            self.auth_ok = False
+            self.auth_message = f"exception={type(e).__name__}: {e}"
+            logging.getLogger(__name__).warning("auth.preflight.error: %s", self.auth_message)
         self._last_event_ms: dict[str, int] = (
             {}
         )  # 注文ごとの最終更新時刻（ms）を覚えて、古いWSイベントを無視するためのメモ
@@ -175,6 +198,10 @@ class OmsEngine:
         if cool_until and now_ms < cool_until:
             remaining = cool_until - now_ms
             raise RiskBreach(f"symbol cooldown active for {req.symbol}: {remaining}ms remaining")
+        elif cool_until and now_ms >= cool_until:
+            # 期限満了でブロック解除される瞬間に 'cooldown.exit' を記録（解除処理の直前）
+            self._log_cooldown_exit(req.symbol, "timeout")
+            self._symbol_cooldown_until.pop(req.symbol, None)
         self._inflight_client_ids.add(coid)  # 今回送るIDをメモして二重送信を防止
 
         if not req.client_id:
@@ -189,6 +216,11 @@ class OmsEngine:
             req.price,
             req.client_id,
         )
+
+        # 認証NGなら「監視のみ」。発注系APIは一切呼ばず、安全に戻る
+        if not getattr(self, "auth_ok", False):
+            logging.getLogger(__name__).info("order.skip: auth=false reason=%s", getattr(self, "auth_message", ""))
+            return None
 
         created = await self._ex.place_order(req)
 
@@ -728,11 +760,20 @@ class OmsEngine:
                 self._symbol_cooldown_ms,
             )  # REJECT連発→クールダウン突入
             self._symbol_cooldown_until[symbol] = now_ms + self._symbol_cooldown_ms
+            self._cooldown_active[symbol] = (
+                True  # 何をする？→ 突入時に“現在クールダウン中”フラグを立てる（出口で一度だけログするため）
+            )
             # メトリクス更新
             self._metrics_cooldown_enter_total[symbol] = self._metrics_cooldown_enter_total.get(symbol, 0) + 1
             self._metrics_cooldown_enter_period[symbol] = self._metrics_cooldown_enter_period.get(symbol, 0) + 1
             # 次の連発を独立に数える
             self._reject_window[symbol] = (now_ms, 0)
+
+    def _log_cooldown_exit(self, symbol: str, reason: str) -> None:
+        """何をする関数？→ クールダウン解除の瞬間に一度だけ 'cooldown.exit' をINFOで記録する。"""
+        if self._cooldown_active.get(symbol):
+            logging.getLogger(__name__).info("cooldown.exit symbol=%s reason=%s", symbol, reason)
+            self._cooldown_active[symbol] = False  # これで同じ解除イベントの重複ログを防止する
 
     async def maintain_postonly_orders(self, symbols: list[str], strat_cfg) -> None:
         """PostOnlyの未約定指値をBBOにあわせて安全に少しだけ寄せる。

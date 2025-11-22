@@ -147,6 +147,19 @@ python -m bot.app.live_runner --env testnet --config config/app.yaml --ops-check
 通常起動
 python -m bot.app.live_runner --env testnet --config config/app.yaml
 
+PowerShell 前提で、用途別にワンライナーだけ出します。
+
+PaperRunner（REST + Public WS, Paper OMS）
+python -m bot.app.paper_runner --config config/app.yaml
+
+LiveRunner（dry-run, REST + Public WS + Strategy + PaperExchange）
+python -m bot.app.live_runner --env mainnet --dry-run --config config/app.mainnet.yaml --log-level DEBUG
+
+LiveRunner（本番相当, Private WS + REST + OMS + Strategy）
+python -m bot.app.live_runner --env mainnet --config config/app.mainnet.yaml --log-level DEBUG
+
+
+
 Live（Mainnet）
 .\scripts\start_mainnet.ps1
 健診のみ: 

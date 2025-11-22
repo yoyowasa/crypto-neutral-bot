@@ -394,6 +394,29 @@ class BacktestRunner:
                 }
                 await self._paper.handle_public_msg(msg_tr)
 
+            # backtest補助：Strategyの市場データREADY判定を通すための擬似スケール/ガード/アンカーをPaperExchangeに付与
+            # - _scale_cache: priceScale が存在すれば「スケール準備OK」と判定される
+            # - _price_state: READY にして価格ガードを通す
+            # - _last_spot_px/_last_index_px: アンカー価格（spot→index）に利用される
+            try:
+                if not hasattr(self._paper, "_scale_cache"):
+                    self._paper._scale_cache = {}
+                if not hasattr(self._paper, "_price_state"):
+                    self._paper._price_state = {}
+                sc = self._paper._scale_cache
+                ps = self._paper._price_state
+                sc[tick.symbol] = {"priceScale": 2}
+                ps[tick.symbol] = "READY"
+                if tick.last is not None:
+                    if not hasattr(self._paper, "_last_spot_px"):
+                        self._paper._last_spot_px = {}
+                    if not hasattr(self._paper, "_last_index_px"):
+                        self._paper._last_index_px = {}
+                    self._paper._last_spot_px[tick.symbol] = float(tick.last)
+                    self._paper._last_index_px[tick.symbol] = float(tick.last)
+            except Exception:
+                pass  # backtest便宜用の付帯属性なので、失敗時は黙殺
+
             # Funding 適用
             await self._apply_funding_if_due(tick.ts)
 

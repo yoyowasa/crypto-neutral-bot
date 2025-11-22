@@ -1,0 +1,73 @@
+# 何をするスクリプト？
+# - Windows の時刻を NTP で同期（要: 管理者権限）
+# - その後、ops-check を 120 秒収集して ops-check.json に書き出し
+# - 収集後、数量刻み/最小制約の主要項目をダンプして確認を支援
+
+param(
+  [int]$Seconds = 120
+)
+
+function Write-Info($msg) { Write-Host "[INFO] $msg" -ForegroundColor Cyan }
+function Write-Warn($msg) { Write-Host "[WARN] $msg" -ForegroundColor Yellow }
+function Write-Err($msg)  { Write-Host "[ERR ] $msg" -ForegroundColor Red }
+
+# 1) 時刻同期（管理者権限が無い場合はスキップし、手動案内）
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+  Write-Warn "管理者権限での起動ではありません。時刻同期はスキップします。"
+  Write-Warn "管理者権限で実行すると NTP 同期も自動で行えます。"
+} else {
+  try {
+    Write-Info "Windows 時刻サービスをNTPに設定し直し、再起動します…"
+    w32tm /config /manualpeerlist:"time.google.com,0x8 time.cloudflare.com,0x8 time.windows.com,0x8" /syncfromflags:manual /update | Out-Null
+    Restart-Service w32time -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    w32tm /resync /force | Out-Null
+    Write-Info "時刻同期 OK。状態:"
+    w32tm /query /status
+    w32tm /query /peers
+  } catch {
+    Write-Warn "時刻同期に失敗しました（権限やネットワークを確認してください）。$_"
+  }
+}
+
+# 2) ops-check を一定時間収集
+Write-Info "ops-check を $Seconds 秒収集します…"
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+  Write-Err "python が見つかりません。仮想環境を有効にするか Path を確認してください。"
+  exit 1
+}
+
+$argsList = @('-m','bot.app.live_runner','--dry-run','--ops-check','--ops-out-json','ops-check.json','--log-level','INFO')
+$p = Start-Process -FilePath python -ArgumentList $argsList -PassThru
+try {
+  Start-Sleep -Seconds $Seconds
+} finally {
+  try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
+}
+Write-Info "収集終了。ops-check.json から主要項目を確認します…"
+
+try {
+  $code = @"
+import json
+from pathlib import Path
+p=Path('ops-check.json')
+if not p.exists():
+    print('ops-check.json missing')
+else:
+    rows=json.load(open(p,'r',encoding='utf-8'))
+    if not rows:
+        print('ops-check empty')
+    else:
+        r=rows[0]
+        keys=['qty_step_spot','qty_step_perp','qty_common_step','min_qty_spot','min_qty_perp','min_notional_spot','min_notional_perp']
+        print({k:r.get(k) for k in keys})
+"@
+  python - << $code
+} catch {
+  Write-Warn "ops-check の読み取りに失敗しました。$_"
+}
+
+Write-Info "完了。値が None のままの場合は、もう少し運転（>60秒）して再度ご確認ください。"
+
+

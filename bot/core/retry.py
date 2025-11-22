@@ -26,11 +26,20 @@ def _log_before_sleep(retry_state: RetryCallState) -> None:
     attempt = retry_state.attempt_number
     exc = retry_state.outcome.exception() if retry_state.outcome else None
     wait_s = getattr(retry_state.next_action, "sleep", None)
+    # 認証系の既知メッセージに簡易ヒントを付与
+    hint = None
+    try:
+        msg = str(exc)
+        if "API key is invalid" in msg or 'retCode":10003' in msg:
+            hint = "(Bybit認証エラー: キー不正/環境(testnet/mainnet)不一致の可能性)"
+    except Exception:
+        pass
     logger.warning(
-        "retryable: {fn} attempt={attempt} error={exc} next_wait={wait}s",
+        "retryable: {fn} attempt={attempt} error={exc} {hint} next_wait={wait}s",
         fn=fn_name,
         attempt=attempt,
         exc=exc,
+        hint=hint or "",
         wait=wait_s,
     )
 

@@ -1,9 +1,124 @@
 from __future__ import annotations
 
+import logging  # 標準logging→loguru(JSONL)ブリッジ用
+import re
 import sys
 from pathlib import Path
 
 from loguru import logger
+
+ORDER_INFO_PREFIXES = (
+    "order.submit",
+    "order.placed",
+    "order.ack",
+    "order.reject",
+    "order.cancel",
+    "order.amend",
+    "order.amended",
+    "fill.",
+    "position.",
+    "trade.",
+)  # 注文/約定/ポジ系イベントをINFOへ昇格させる対象
+
+
+def _loguru_origin_patcher(record: dict) -> None:
+    # loguru直書きログにも origin* を自動付与する
+    extra = record["extra"]
+    if "origin" in extra:
+        return
+    extra["origin"] = record["name"]  # ロガー名
+    extra["origin_module"] = record["module"]  # モジュール名
+    extra["origin_func"] = record["function"]  # 関数名
+    extra["origin_file"] = record["file"].name  # ファイル名
+    extra["origin_line"] = record["line"]  # 行番号
+    # loguru直書きでDEBUGの注文系イベントはINFOへ昇格（JSONLのINFOシンクで確実に可視化）
+    if record["level"].name == "DEBUG" and record["message"].startswith(ORDER_INFO_PREFIXES):
+        record["level"].name = "INFO"
+        record["level"].no = logger.level("INFO").no
+
+
+def apply_loguru_patcher() -> None:
+    # loguru全体に patcher を適用して origin* メタを保証する
+    logger.configure(patcher=_loguru_origin_patcher)
+
+
+# 注文イベントを検出してINFOへ昇格させるためのパターン群
+ORDER_PROMOTION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"order\.(submit|place|placed|ack|reject|cancel|amend)", re.IGNORECASE),
+    re.compile(r"position\.(open|increase|decrease|close|update)", re.IGNORECASE),
+    re.compile(r"(fill|executed|trade_id|約定|成交)", re.IGNORECASE),
+)
+
+
+class InterceptHandler(logging.Handler):
+    """標準loggingのレコードをloguruへ転送する中継ハンドラ。"""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = record.getMessage()  # メッセージ展開を一度だけ行い再利用する
+        try:
+            level = logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+
+        if record.levelno == logging.INFO and (
+            msg.startswith("bybit.get_ticker.") or msg.startswith("bybit.get_funding.")
+        ):
+            level = "DEBUG"  # bybitのcall/okはINFO扱いでもDEBUGへ落としてJSONLから除外する
+
+        if record.levelno < logging.INFO and any(p.search(msg) for p in ORDER_PROMOTION_PATTERNS):
+            level = "INFO"  # 注文・ポジション関連イベントのみINFOへ昇格させる
+
+        frame = logging.currentframe()
+        depth = 2
+        while frame and frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back
+            depth += 1
+
+        # 標準logging経由でDEBUGの注文系イベントはINFOへ昇格（JSONLのINFOシンクで可視化）
+        msg = record.getMessage()
+        if record.levelno == logging.DEBUG and msg.startswith(ORDER_INFO_PREFIXES):
+            level = "INFO"
+
+        logger.bind(
+            origin=record.name,
+            origin_module=record.module,
+            origin_func=record.funcName,
+            origin_file=record.filename,
+            origin_line=record.lineno,
+        ).opt(depth=depth, exception=record.exc_info).log(
+            level, msg
+        )  # 発生元メタ情報付きでloguruへ転送
+
+
+def _inject_origin(record: dict) -> dict:
+    """loguru直書きログにもorigin系メタ情報を付与するパッチャ。"""
+
+    extra = record.setdefault("extra", {})
+    if "origin" in extra:
+        return record
+
+    extra["origin"] = record.get("name")
+    extra["origin_module"] = record.get("module")
+    extra["origin_func"] = record.get("function")
+
+    file_info = record.get("file", {})
+    if isinstance(file_info, dict):
+        extra["origin_file"] = file_info.get("name")
+    else:
+        extra["origin_file"] = getattr(file_info, "name", None)
+
+    extra["origin_line"] = record.get("line")
+    return record
+
+
+def setup_std_logging_bridge() -> None:
+    """標準loggingのrootをInterceptHandlerに置き換えてloguruへ橋渡しする。"""
+
+    root = logging.getLogger()
+    if not any(isinstance(h, InterceptHandler) for h in root.handlers):
+        root.handlers.append(InterceptHandler())  # 既存ハンドラを保持したままブリッジを追加
+    root.setLevel(logging.NOTSET)
+    logging.captureWarnings(True)
 
 
 def setup_logging(
@@ -19,6 +134,7 @@ def setup_logging(
       1) Human-readable: logs/app.log (rotated daily at UTC midnight)
       2) JSON structured: logs/app.jsonl (rotated daily at UTC midnight)
     """
+    logger.configure(patcher=_inject_origin)
     logger.remove()
 
     log_path = Path(log_dir)
@@ -40,6 +156,7 @@ def setup_logging(
         enqueue=True,
         backtrace=True,
         diagnose=False,
+        encoding="utf-8",
         format=human_format,
     )
 
@@ -52,8 +169,12 @@ def setup_logging(
         enqueue=True,
         backtrace=True,
         diagnose=False,
+        encoding="utf-8",
         serialize=True,
     )
+    apply_loguru_patcher()  # JSONLシンク設定直後にorigin*自動付与を有効化
+
+    setup_std_logging_bridge()  # 標準logging→loguru(JSONL)ブリッジを起動
 
     # Console sink (stdout)
     logger.add(

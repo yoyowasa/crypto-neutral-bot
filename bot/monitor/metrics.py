@@ -99,12 +99,13 @@ class MetricsLogger:
                 max(abs(hold.perp_long_qty), abs(hold.perp_short_qty)) * px_perp,
             )
 
+            # 価格表示の桁落ちを防ぐため、6桁固定表示に変更（px_spot/px_perp）
             logger.info(
-                "metrics heartbeat: sym={} px_spot={} px_perp={} net_delta_bps={} notional={} "
+                "metrics heartbeat: sym={} px_spot={:.6f} px_perp={:.6f} net_delta_bps={} notional={} "
                 "daily_pnl_gross={} fees={} daily_pnl_net={} killed={}",
                 sym,
-                round(px_spot, 6),
-                round(px_perp, 6),
+                px_spot,
+                px_perp,
                 round(net_delta_bps, 3),
                 round(notional, 2),
                 round(gross, 2),

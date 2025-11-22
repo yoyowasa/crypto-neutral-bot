@@ -1,0 +1,69 @@
+# 本番(mainnet)向け設定ファイルです。
+# - API キーは .env（KEYS__API_KEY / KEYS__API_SECRET）から読み込みます。
+# - 最大ノーション（max_total_notional）は実際のリスクに合わせて調整してください。
+
+keys:
+  # 実キーは .env の環境変数から読み込み、このファイルには書かないこと。
+  api_key: "${KEYS__API_KEY:-}"
+  api_secret: "${KEYS__API_SECRET:-}"
+
+exchange:
+  # Bitget 前提の本番設定。必要なら name/environment を上書きする。
+  name: bitget
+  environment: mainnet
+  allow_live: true  # scripts/start_mainnet.ps1 から起動する際に live を許可
+
+  # 安全寄りのパラメータ例
+  bbo_max_age_ms: 1500           # PostOnly 調整で使う BBO の最大遅延
+  rest_max_concurrency: 2        # REST リクエスト並列数（429 を避けるため控えめ）
+  rest_cb_fail_threshold: 3      # サーキットブレーカーを開く失敗回数
+  rest_cb_open_seconds: 5        # サーキットブレーカーのクールダウン秒数
+  instrument_info_ttl_s: 600     # シンボル定義の再取得間隔（秒）
+
+risk:
+  # 総ノーション上限・銘柄ごとのノーション上限（USD 相当）
+  max_total_notional: 10000.0
+  max_symbol_notional: 5000.0
+
+  # ネットデルタ上限（ベースに対する割合）。0.002 = 0.2%
+  max_net_delta: 0.002
+
+  # スリッページ上限（bps）。10bps = 0.1%
+  max_slippage_bps: 10.0
+
+  # 1 日あたりの損失許容額（JPY 表示の目安）
+  loss_cut_daily_jpy: 30000.0
+
+  # 価格ガード: mid からの乖離許容（bps）
+  price_dev_bps_limit: 50
+
+  # Private WS が古くなったとみなすまでの ms
+  ws_stale_block_ms: 15000
+
+  # REJECT 連発時のクールダウン
+  reject_burst_threshold: 3
+  reject_burst_window_s: 30
+  symbol_cooldown_s: 120
+
+strategy:
+  # 対象銘柄
+  symbols: ["BTCUSDT", "ETHUSDT"]
+
+  # Funding/Basis 関連
+  min_expected_apr: 0.13               # 新規エントリーに必要な APR（年率）
+  holdover_min_expected_apr: 0.10      # 継続保有を許容する APR 下限
+  pre_event_open_minutes: 15           # Funding 前何分から仕掛けるか
+  hold_across_events: false            # Funding イベントをまたいで保有するか
+  rebalance_band_bps: 20.0             # ネットデルタのリバランス帯（bps）
+
+  # Maker チェイス（PostOnly amend）
+  chase_enabled: true
+  chase_min_reprice_bps: 4
+  chase_min_reprice_ticks: 1
+  chase_interval_ms: 2500
+  chase_max_amends_per_min: 6
+
+# DB / タイムゾーン
+db_url: "sqlite+aiosqlite:///./db/trading.db"
+timezone: "UTC"
+

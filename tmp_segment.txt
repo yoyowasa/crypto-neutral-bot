@@ -1,0 +1,87 @@
+                    pass
+                finally:
+                    with suppress(Exception):
+                        await pub.close()
+            raise ExchangeError(f"get_ticker failed: {e}") from e
+
+    def _normalize_ticker_price(self, symbol: str, ticker: dict, anchor_spot: float | None = None) -> float:
+        info = ticker.get("info") or {}
+        existing_scale = self._price_scale.get(symbol, 1.0)
+        raw_last = self._safe_float(ticker.get("last"))
+        index_price = self._safe_float(info.get("indexPrice"))
+        mark_price = self._safe_float(info.get("markPrice"))
+        raw_bid = self._safe_float(ticker.get("bid")) or self._safe_float(info.get("bid1Price"))
+        raw_ask = self._safe_float(ticker.get("ask")) or self._safe_float(info.get("ask1Price"))
+
+        scale = existing_scale
+        price = None
+
+        if raw_last is not None and index_price is not None and index_price > 0:
+            ratio = raw_last / index_price if index_price else None
+            if ratio is not None and (ratio >= 4.0 or ratio <= 0.25):
+                scale = index_price / raw_last if raw_last else 1.0
+                price = index_price
+            else:
+                scale = 1.0
+                price = raw_last
+        elif raw_last is not None:
+            price = raw_last * scale
+        elif index_price is not None:
+            scale = 1.0
+            price = index_price
+        elif mark_price is not None:
+            price = mark_price * scale
+
+        scaled_bid = raw_bid * scale if raw_bid is not None else None
+        scaled_ask = raw_ask * scale if raw_ask is not None else None
+
+        if price is None:
+            if scaled_bid is not None and scaled_ask is not None:
+                price = (scaled_bid + scaled_ask) / 2.0
+            elif scaled_bid is not None:
+                price = scaled_bid
+            elif scaled_ask is not None:
+                price = scaled_ask
+
+        if price is None:
+            raise ExchangeError(f"ticker has no price fields: {ticker}")
+
+        if (not symbol.endswith("_SPOT")) and (anchor_spot is not None):
+            try:
+                ratio = None
+                if price and anchor_spot:
+                    ratio = float(price) / float(anchor_spot)
+                if ratio is None or (ratio > 2.0 or ratio < 0.5):
+                    ref_raw = None
+                    if raw_last is not None:
+                        ref_raw = raw_last
+                    elif raw_bid is not None and raw_ask is not None:
+                        ref_raw = (raw_bid + raw_ask) / 2.0
+                    elif raw_bid is not None:
+                        ref_raw = raw_bid
+                    elif raw_ask is not None:
+                        ref_raw = raw_ask
+                    if ref_raw and ref_raw > 0:
+                        scale = float(anchor_spot) / float(ref_raw)
+                        price = float(anchor_spot)
+            except Exception:
+                pass
+
+        if abs(scale - 1.0) > 1e-9:
+            self._price_scale[symbol] = scale
+        else:
+            self._price_scale.pop(symbol, None)
+
+        # --- scale 安定性の連続カウントを更新（ready 判定用）---
+        try:
+            prev = self._scale_recent.get(symbol)
+            now_ms = int(utc_now().timestamp() * 1000)
+            if prev is None:
+                # 初回観測
+                self._scale_recent[symbol] = float(scale)
+                self._price_scale_ready_count[symbol] = 1
+                self._price_scale_wait_start_ms[symbol] = now_ms
+            else:
+                if abs(float(scale) - float(prev)) <= 1e-9:
+                    # 変動なし -> 連続回数を加算
+                    self._price_scale_ready_count[symbol] = self._price_scale_ready_count.get(symbol, 0) + 1

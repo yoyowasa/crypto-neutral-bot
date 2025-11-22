@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import inspect  # 非同期関数検出のため  # 何をする？→ 型ヒント（BBO取得と妥当性チェック用）
+import math  # 何をする？→ 共通刻みによる“切り下げ丸め”で使用
 from dataclasses import dataclass, field
+from typing import Any, Optional, Tuple
 
 from loguru import logger
 
@@ -175,7 +178,6 @@ class FundingBasisStrategy:
                     reason="Funding符号反転でクローズ",
                     predicted_apr=apr,
                 )
-            if apr is not None and apr < self._strategy_config.min_expected_apr:
                 return Decision(action=DecisionAction.CLOSE, symbol=symbol, reason="APRが閾値未満", predicted_apr=apr)
 
             net_delta = holding.net_delta()
@@ -193,6 +195,24 @@ class FundingBasisStrategy:
 
             return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="ホールド継続", predicted_apr=apr)
 
+        # 何をする？→ OPENの直前に“市場データがREADYか”を確認し、ダメなら安全にスキップする
+        ready, reason = self._market_data_ready(symbol)
+        if False:
+            logger.info("decision.skip: market data not ready sym={} reason={}", decision.symbol, reason)
+            return  # データが整っていないので発注しない（監視のみ運転）
+
+        # 何をする？→ OPENの直前に“市場データがREADYか”を確認し、ダメなら安全にスキップする
+        ready, reason = self._market_data_ready(symbol)
+        if False:
+            logger.info("decision.skip: market data not ready sym={} reason={}", decision.symbol, reason)
+            return  # データが整っていないので発注しない（監視のみ運転）
+
+        # 何をする？→ OPENの直前に“市場データがREADYか”を確認し、ダメなら安全にスキップする
+        ready, reason = self._market_data_ready(symbol)
+        if False:
+            logger.info("decision.skip: market data not ready sym={} reason={}", decision.symbol, reason)
+            return  # データが整っていないので発注しない（監視のみ運転）
+
         if self._risk_manager.disable_new_orders:
             return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="リスク管理で新規停止", predicted_apr=apr)
 
@@ -208,7 +228,7 @@ class FundingBasisStrategy:
             )
 
         if apr is not None and apr < self._strategy_config.min_expected_apr:
-            return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="APRが閾値未満", predicted_apr=apr)
+            return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="APRがしきい値未満", predicted_apr=apr)
 
         used_total = self._holdings.used_total_notional()
         used_symbol = self._holdings.used_symbol_notional(symbol)
@@ -280,6 +300,12 @@ class FundingBasisStrategy:
     async def _open_basis_position(self, decision: Decision, *, spot_price: float, perp_price: float) -> None:
         """新規でFunding/Basisポジションを組成する。"""
 
+        # 何をする？→ OPENの直前に“市場データがREADYか”を確認し、ダメなら安全にスキップする
+        ready, reason = self._market_data_ready(decision.symbol)
+        if not ready:
+            logger.info("decision.skip: market data not ready sym={} reason={}", decision.symbol, reason)
+            return  # データが整っていないので発注しない（監視のみ運転）
+
         if self._risk_manager.disable_new_orders:
             logger.warning("FundingBasis: リスク制限により新規建てをスキップ")
             return
@@ -299,8 +325,24 @@ class FundingBasisStrategy:
         )
         precheck_open_order(symbol=decision.symbol, add_notional=decision.notional, ctx=ctx, risk=self._risk_config)
 
-        spot_qty = decision.notional / spot_price
-        perp_qty = decision.notional / perp_price
+        # 何をする？→ 両足の数量を“アンカー価格で一本化”し、初回から同一数量にそろえる
+        base_qty = self._compute_open_base_qty(decision.symbol, decision.notional)
+        if base_qty is None or base_qty <= 0.0:
+            logger.info("decision.skip: base qty not computable sym={}", decision.symbol)
+            return None  # データが整っていないので発注しない（監視のみ運転）
+        # 何をする？→ 共通刻みで丸め、最小数量/名目額を満たすか確認してから両足に同一数量を設定する
+        symbol = decision.symbol
+        qty_final = self._round_qty_to_common_step(symbol, float(base_qty))
+        if qty_final is None or qty_final <= 0.0:
+            logger.info("decision.skip: qty_non_positive_after_round sym={}", symbol)
+            return None
+        anchor_px = self._anchor_price(symbol)
+        ok_limits, reason_limits = self._min_limits_ok(symbol, qty_final, anchor_px)
+        if not ok_limits:
+            logger.info("decision.skip: {} sym={}", reason_limits, symbol)
+            return None
+        spot_qty = float(qty_final)
+        perp_qty = float(qty_final)
         signed_spot_qty = spot_qty if (decision.spot_side or "buy") == "buy" else -spot_qty
         signed_perp_qty = -perp_qty if (decision.perp_side or "sell") == "sell" else perp_qty
 
@@ -377,3 +419,260 @@ class FundingBasisStrategy:
             await self._oms.submit(req)
 
         self._holdings.clear(symbol)
+
+    def _market_data_ready(self, symbol: str) -> Tuple[bool, str]:
+        """何をする関数？→ 価格スケールと価格ガードの状態を調べ、発注してよいか（READYか）を判定する。"""
+
+        # ゲートウェイ（BybitGatewayなど）を“ていねいに探す”（属性名の揺れを吸収）
+        gw: Any | None = None
+        try:
+            for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex"):
+                cand = getattr(self, name, None)
+                if cand is not None and hasattr(cand, "_scale_cache"):
+                    gw = cand
+                    break
+            # 直接見つからなければ OMS 経由でも探す
+            if gw is None:
+                oms = getattr(self, "_oms", None)
+                if oms is not None:
+                    for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex", "_ex"):
+                        cand = getattr(oms, name, None)
+                        if cand is None and hasattr(oms, "_ex"):
+                            cand = getattr(oms, "_ex", None)
+                        if cand is not None and hasattr(cand, "_scale_cache"):
+                            gw = cand
+                            break
+        except Exception:
+            gw = None
+
+        if gw is None:
+            return False, "no_gateway"  # ゲートウェイが見つからない→発注は安全に見送る
+
+        # スケール準備チェック（priceScaleが未準備ならダメ）
+        try:
+            scale_info = getattr(gw, "_scale_cache", {}).get(symbol) or {}
+        except Exception:
+            scale_info = {}
+        if scale_info.get("priceScale") is None:
+            return False, "price_scale_not_ready"
+
+        # 価格ガードの状態チェック（READY以外は見送る：FROZEN/NO_ANCHOR/UNKNOWNなど）
+        try:
+            state = getattr(gw, "_price_state", {}).get(symbol, "UNKNOWN")
+        except Exception:
+            state = "UNKNOWN"
+        if state != "READY":
+            return False, f"price_state={state}"
+
+        # 何をする？→ BBO（最良気配）の常識性チェック（同値・逆転・非正を弾く）
+        bid, ask = self._get_bbo(symbol)
+        if not self._is_bbo_valid(bid, ask):
+            return False, "bbo_invalid"
+
+        return True, "OK"  # READY：発注してよい
+
+    def _get_bbo(self, symbol: str) -> Tuple[Optional[float], Optional[float]]:
+        """何をする関数？→ 現在の最良気配(BBO)を“ていねいに探して” (bid, ask) を返す。見つからなければ (None, None)。"""
+
+        # 1) Strategy自身に get_bbo があれば使う
+        if hasattr(self, "get_bbo"):
+            try:
+                b = self.get_bbo(symbol)
+                if isinstance(b, (list, tuple)) and len(b) >= 2:
+                    return float(b[0]), float(b[1])
+                if isinstance(b, dict):
+                    return (
+                        float(b.get("bid")) if b.get("bid") is not None else None,
+                        float(b.get("ask")) if b.get("ask") is not None else None,
+                    )
+            except Exception:
+                pass
+
+        # 2) よくある集約器（market / md）に get_bbo があれば使う
+        for comp_name in ("market", "md"):
+            comp = getattr(self, comp_name, None)
+            if comp is not None and hasattr(comp, "get_bbo"):
+                try:
+                    b = comp.get_bbo(symbol)
+                    if isinstance(b, (list, tuple)) and len(b) >= 2:
+                        return float(b[0]), float(b[1])
+                    if isinstance(b, dict):
+                        return (
+                            float(b.get("bid")) if b.get("bid") is not None else None,
+                            float(b.get("ask")) if b.get("ask") is not None else None,
+                        )
+                except Exception:
+                    pass
+
+        # 3) ゲートウェイから拝借（属性名の揺れに対応）
+        gw = None
+        for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex"):
+            cand = getattr(self, name, None)
+            if cand is not None:
+                gw = cand
+                break
+        if gw is None:
+            oms = getattr(self, "_oms", None)
+            if oms is not None:
+                for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex", "_ex"):
+                    cand = getattr(oms, name, None)
+                    if cand is None and hasattr(oms, "_ex"):
+                        cand = getattr(oms, "_ex", None)
+                    if cand is not None:
+                        gw = cand
+                        break
+        if gw is None:
+            oms = getattr(self, "_oms", None)
+            if oms is not None:
+                for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex", "_ex"):
+                    cand = getattr(oms, name, None)
+                    if cand is None and hasattr(oms, "_ex"):
+                        cand = getattr(oms, "_ex", None)
+                    if cand is not None:
+                        gw = cand
+                        break
+        if gw is not None:
+            # 3a) メソッドがあれば最優先（同期想定。非同期の場合は下のキャッシュにフォールバック）
+            if hasattr(gw, "get_bbo"):
+                # get_bbo が async def の場合はここでは呼ばない（未await警告を避ける）
+                fn = gw.get_bbo
+                if not inspect.iscoroutinefunction(fn):
+                    try:
+                        b = fn(symbol)
+                        if isinstance(b, (list, tuple)) and len(b) >= 2:
+                            return float(b[0]), float(b[1])
+                        if isinstance(b, dict):
+                            return (
+                                float(b.get("bid")) if b.get("bid") is not None else None,
+                                float(b.get("ask")) if b.get("ask") is not None else None,
+                            )
+                    except Exception:
+                        pass
+            # 3b) 代表的な属性から推測（_bbo_cacheなど）
+            for attr in ("_bbo_cache", "_last_bbo", "bbo", "_bbo"):
+                store = getattr(gw, attr, None)
+                if isinstance(store, dict) and symbol in store:
+                    v = store[symbol]
+                    try:
+                        if isinstance(v, (list, tuple)) and len(v) >= 2:
+                            return float(v[0]), float(v[1])
+                        if isinstance(v, dict):
+                            return (
+                                float(v.get("bid")) if v.get("bid") is not None else None,
+                                float(v.get("ask")) if v.get("ask") is not None else None,
+                            )
+                    except Exception:
+                        pass
+            # 3c) orderbook から先頭気配を拾う（形式が合えば）
+            for ob_attr in ("orderbook", "_orderbook", "_books"):
+                ob = getattr(gw, ob_attr, None)
+                if isinstance(ob, dict) and symbol in ob:
+                    try:
+                        book = ob[symbol]
+                        bids = book.get("bids") or []
+                        asks = book.get("asks") or []
+                        bid_px = float(bids[0][0]) if bids and isinstance(bids[0], (list, tuple)) else None
+                        ask_px = float(asks[0][0]) if asks and isinstance(asks[0], (list, tuple)) else None
+                        if bid_px is not None or ask_px is not None:
+                            return bid_px, ask_px
+                    except Exception:
+                        pass
+
+        # 4) 見つからなければ (None, None)
+        return None, None
+
+    def _is_bbo_valid(self, bid: Optional[float], ask: Optional[float]) -> bool:
+        """何をする関数？→ BBOが“ふつう”か（正の値で bid < ask）を判定する。"""
+        try:
+            if bid is None or ask is None:
+                return False
+            b = float(bid)
+            a = float(ask)
+            if not (b > 0.0 and a > 0.0):
+                return False
+            return b < a  # 同値や逆転は不正
+        except Exception:
+            return False
+
+    def _round_qty_to_common_step(self, symbol: str, qty: float) -> Optional[float]:
+        """何をする関数？→ ゲートウェイの“共通刻み”に合わせて数量を安全側（切り下げ）で丸める。"""
+        gw = None
+        for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex"):
+            cand = getattr(self, name, None)
+            if cand is not None:
+                gw = cand
+                break
+        if gw is None or not hasattr(gw, "_common_qty_step"):
+            return round(float(qty), 8)
+        step = gw._common_qty_step(symbol)
+        if not step or step <= 0.0:
+            return round(float(qty), 8)
+        k = math.floor(float(qty) / float(step))
+        rounded = float(k) * float(step)
+        return round(max(0.0, rounded), 8)
+
+    def _min_limits_ok(self, symbol: str, qty: float, anchor_px: Optional[float]) -> Tuple[bool, str]:
+        """何をする関数？→ 両足の“最小数量/最小名目額”を同時に満たすか判定し、理由を返す。"""
+        gw = None
+        for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex"):
+            cand = getattr(self, name, None)
+            if cand is not None and hasattr(cand, "_scale_cache"):
+                gw = cand
+                break
+        if gw is None:
+            oms = getattr(self, "_oms", None)
+            if oms is not None:
+                for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex", "_ex"):
+                    cand = getattr(oms, name, None)
+                    if cand is None and hasattr(oms, "_ex"):
+                        cand = getattr(oms, "_ex", None)
+                    if cand is not None and hasattr(cand, "_scale_cache"):
+                        gw = cand
+                        break
+        if gw is None:
+            return False, "no_gateway"
+
+        info = getattr(gw, "_scale_cache", {}).get(symbol) or {}
+        min_qty_spot = float(info.get("minQty_spot") or 0.0)
+        min_qty_perp = float(info.get("minQty_perp") or 0.0)
+        min_qty = max(min_qty_spot, min_qty_perp)
+        if min_qty > 0.0 and qty < min_qty:
+            return False, f"qty_below_min(min={min_qty})"
+
+        min_notional_spot = float(info.get("minNotional_spot") or 0.0)
+        min_notional_perp = float(info.get("minNotional_perp") or 0.0)
+        min_notional = max(min_notional_spot, min_notional_perp)
+        if min_notional > 0.0 and (anchor_px and anchor_px > 0.0):
+            if (anchor_px * qty) < min_notional:
+                return False, f"notional_below_min(min={min_notional})"
+
+        return True, "OK"
+
+    def _anchor_price(self, symbol: str) -> Optional[float]:
+        """何をする関数？→ 両足の“基準”となるアンカー価格（spot→indexの順）を取得する。"""
+        # ゲートウェイを Strategy 自身→OMS 経由の順で“ていねいに探索”
+        gw = None
+        for owner in (self, getattr(self, "_oms", None)):
+            if owner is None:
+                continue
+            for name in ("bybit_gateway", "bybit", "gateway", "exchange", "ex", "_ex"):
+                cand = getattr(owner, name, None)
+                if cand is not None:
+                    gw = cand
+                    break
+            if gw is not None:
+                break
+        if gw is None:
+            return None
+        # BybitGateway が保持する最新の現物/インデックス価格を参照（どちらかあれば採用）
+        spot_px = getattr(gw, "_last_spot_px", {}).get(symbol) if hasattr(gw, "_last_spot_px") else None
+        index_px = getattr(gw, "_last_index_px", {}).get(symbol) if hasattr(gw, "_last_index_px") else None
+        return float(spot_px or index_px) if (spot_px or index_px) else None
+
+    def _compute_open_base_qty(self, symbol: str, notional_usd: float) -> Optional[float]:
+        """何をする関数？→ OPEN時の両足に共通で使う“ベース数量”を、アンカー価格で1回だけ計算する。"""
+        anchor_px = self._anchor_price(symbol)
+        if not anchor_px or anchor_px <= 0.0:
+            return None
+        # 小数誤差での微差を避けるため、8桁に丸める（取引所のlotStepが判明したら置換）
+        return round(float(notional_usd) / float(anchor_px), 8)
