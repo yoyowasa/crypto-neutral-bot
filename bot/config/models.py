@@ -60,6 +60,9 @@ class StrategyFundingConfig(BaseModel):
     pre_event_open_minutes: int = 15
     hold_across_events: bool = False
     rebalance_band_bps: float = 20.0
+    min_hold_periods: float = 6.0  # 期待収益計算で想定する最低Funding回数（例:6回=約2日）
+    taker_fee_bps_roundtrip: float = 6.0  # 往復テイカー手数料[bps]
+    estimated_slippage_bps: float = 5.0  # 想定スリッページ[bps]
     # PostOnly チェイス（注文価格の追従）設定
     chase_enabled: bool = True
     chase_min_reprice_bps: int = 4

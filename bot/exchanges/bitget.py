@@ -39,13 +39,22 @@ def _safe_float(val: Any) -> float | None:
         return None
 
 
+def _ws_inst_type(symbol: str) -> str:
+    """Bitget v2 WS instType を内部シンボルから決める。"""
+
+    # perp（USDT建て）のみサポート想定。現物は _SPOT 接尾辞を利用。
+    if symbol.endswith("_SPOT"):
+        return "SPOT"
+    return "USDT-FUTURES"
+
+
 async def _bitget_subscribe_private_impl(
     gw: "BitgetGateway",
     callbacks: dict[str, Callable[[dict], Awaitable[None]]],
 ) -> None:
     """Bitget Private WS に接続し、orders/positions を購読してコールバックを呼び出す内部実装。"""
 
-    url = gw._ws_url
+    url = gw._ws_private_url
     idle_timeout = getattr(gw, "_ws_idle_timeout", 60.0)
     api_key = gw._auth.api_key
     api_secret = gw._auth.api_secret
@@ -53,6 +62,24 @@ async def _bitget_subscribe_private_impl(
 
     if not (api_key and api_secret and passphrase):
         raise WsDisconnected("Bitget private WS requires api_key, api_secret and passphrase")
+
+    args: list[dict[str, str]] = []
+    if any(k in callbacks for k in ("order", "execution")):
+        args.append({"instType": "UMCBL", "channel": "orders", "instId": "default"})
+    if "position" in callbacks:
+        args.append({"instType": "UMCBL", "channel": "positions", "instId": "default"})
+
+    channels_summary = ",".join(f"{a.get('channel')}:{a.get('instId')}" for a in args if a.get("channel"))
+    connect_started = time.monotonic()
+    last_recv: float = time.monotonic()
+    loguru_logger.info(
+        "bitget.ws.private.connect start url={} channels={} ping_interval={} timeout={} idle_timeout={}",
+        url,
+        channels_summary or "orders/execution",
+        gw._ws_ping_interval,
+        gw._ws_ping_timeout,
+        idle_timeout,
+    )
 
     try:
         async with websockets.connect(
@@ -91,14 +118,9 @@ async def _bitget_subscribe_private_impl(
                 raise WsDisconnected(f"bitget login failed: {resp}")
 
             # --- subscribe ---
-            args: list[dict[str, str]] = []
-            if any(k in callbacks for k in ("order", "execution")):
-                args.append({"instType": "UMCBL", "channel": "orders", "instId": "default"})
-            if "position" in callbacks:
-                args.append({"instType": "UMCBL", "channel": "positions", "instId": "default"})
-
             if args:
                 await ws.send(json.dumps({"op": "subscribe", "args": args}))
+                loguru_logger.info("bitget.ws.private.subscribed channels={}", channels_summary or "orders/execution")
 
             async def _ping_loop() -> None:
                 while True:
@@ -195,7 +217,13 @@ async def _bitget_subscribe_private_impl(
 
             await asyncio.gather(_ping_loop(), _recv_loop(), _watchdog_loop())
     except Exception as e:  # noqa: BLE001
-        raise WsDisconnected(f"bitget private ws error: {e}") from e
+        elapsed = time.monotonic() - connect_started
+        idle_gap = time.monotonic() - last_recv
+        detail = f"uptime={elapsed:.1f}s channels={channels_summary or 'orders/execution'}"
+        if idle_gap is not None:
+            detail += f" idle_gap={idle_gap:.1f}s"
+        detail += f" ping={gw._ws_ping_interval}s timeout={gw._ws_ping_timeout}s idle_timeout={idle_timeout}s"
+        raise WsDisconnected(f"bitget private ws error: {e}; {detail}") from e
 
 
 async def _bitget_subscribe_public_impl(
@@ -205,22 +233,34 @@ async def _bitget_subscribe_public_impl(
 ) -> None:
     """Bitget Public WS に接続し、ticker/books1/trade を購読してコールバックを呼び出します。"""
 
-    url = gw._ws_url
+    url = gw._ws_public_url
     idle_timeout = getattr(gw, "_ws_idle_timeout", 60.0)
 
     args: list[dict[str, str]] = []
     for sym in symbols:
-        # internal symbol は "BTCUSDT" / "BTCUSDT_SPOT" 想定。WS instId は perp なので末尾 _SPOT は除去。
         inst_id = sym.replace("_SPOT", "")
+        inst_type = _ws_inst_type(sym)
         if "ticker" in callbacks:
-            args.append({"instType": "mc", "channel": "ticker", "instId": inst_id})
+            args.append({"instType": inst_type, "channel": "ticker", "instId": inst_id})
         if "orderbook" in callbacks:
-            args.append({"instType": "mc", "channel": "books1", "instId": inst_id})
+            args.append({"instType": inst_type, "channel": "books", "instId": inst_id})
         if "trade" in callbacks:
-            args.append({"instType": "mc", "channel": "trade", "instId": inst_id})
+            args.append({"instType": inst_type, "channel": "trade", "instId": inst_id})
 
     if not args:
         return
+
+    channels_summary = ",".join(f"{a.get('channel')}:{a.get('instId')}" for a in args if a.get("channel"))
+    connect_started = time.monotonic()
+    last_recv: float = time.monotonic()
+    loguru_logger.info(
+        "bitget.ws.public.connect start url={} channels={} ping_interval={} timeout={} idle_timeout={}",
+        url,
+        channels_summary,
+        gw._ws_ping_interval,
+        gw._ws_ping_timeout,
+        idle_timeout,
+    )
 
     try:
         async with websockets.connect(
@@ -232,6 +272,7 @@ async def _bitget_subscribe_public_impl(
             last_recv = time.monotonic()
             sub = {"op": "subscribe", "args": args}
             await ws.send(json.dumps(sub))
+            loguru_logger.info("bitget.ws.public.subscribed channels={}", channels_summary)
 
             async def _ping_loop() -> None:
                 while True:
@@ -278,7 +319,13 @@ async def _bitget_subscribe_public_impl(
 
             await asyncio.gather(_ping_loop(), _recv_loop(), _watchdog_loop())
     except Exception as e:  # noqa: BLE001
-        raise WsDisconnected(f"bitget public ws error: {e}") from e
+        elapsed = time.monotonic() - connect_started
+        idle_gap = time.monotonic() - last_recv
+        detail = f"uptime={elapsed:.1f}s channels={channels_summary}"
+        if idle_gap is not None:
+            detail += f" idle_gap={idle_gap:.1f}s"
+        detail += f" ping={gw._ws_ping_interval}s timeout={gw._ws_ping_timeout}s idle_timeout={idle_timeout}s"
+        raise WsDisconnected(f"bitget public ws error: {e}; {detail}") from e
 
 
 @dataclass
@@ -293,7 +340,8 @@ class _Auth:
 class BitgetGateway(ExchangeGateway):
     """Bitget (UTA) 用 ExchangeGateway 実装（REST 中心の MVP）。"""
 
-    _ws_url: str = "wss://ws.bitget.com/mix/v1/stream"
+    _ws_public_url: str = "wss://ws.bitget.com/v2/ws/public"
+    _ws_private_url: str = "wss://ws.bitget.com/mix/v1/stream"
     _ws_ping_interval: float = 20.0
     _ws_ping_timeout: float = 10.0
     _ws_idle_timeout: float = 60.0
@@ -314,6 +362,11 @@ class BitgetGateway(ExchangeGateway):
         self._ws_passphrase: str | None = passphrase or os.getenv("KEYS__PASSPHRASE")
         self._log = logging.getLogger(__name__)
         self._debug_private_ws: bool = False
+        self._ws_public_url = os.getenv("WS_PUBLIC_URL") or self._ws_public_url
+        self._ws_private_url = os.getenv("WS_PRIVATE_URL") or self._ws_private_url
+        self._ws_ping_interval = _safe_float(os.getenv("WS_PING_INTERVAL")) or self._ws_ping_interval
+        self._ws_ping_timeout = _safe_float(os.getenv("WS_PING_TIMEOUT")) or self._ws_ping_timeout
+        self._ws_idle_timeout = _safe_float(os.getenv("WS_IDLE_TIMEOUT")) or self._ws_idle_timeout
 
         # --- REST (ccxt) ---
         # Bitget は defaultType="swap", options["uta"]=True で UTA を使う前提。
@@ -447,6 +500,16 @@ class BitgetGateway(ExchangeGateway):
 
         if info:
             self._scale_cache[core] = info
+            try:
+                loguru_logger.info(
+                    "bitget.scale.prime.ok sym={} core={} scale={} keys={}",
+                    symbol,
+                    core,
+                    info.get("priceScale"),
+                    sorted(self._scale_cache.keys()),
+                )
+            except Exception:
+                pass
 
     @staticmethod
     def _order_status_from_ccxt(s: str) -> str:

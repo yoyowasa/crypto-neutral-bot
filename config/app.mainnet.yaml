@@ -50,11 +50,14 @@ strategy:
   symbols: ["BTCUSDT", "ETHUSDT"]
 
   # Funding/Basis 関連
-  min_expected_apr: 0.13               # 新規エントリーに必要な APR（年率）
-  holdover_min_expected_apr: 0.10      # 継続保有を許容する APR 下限
+  min_expected_apr: 0.03               # シンプルに緩和: 年率3%閾値（検証モード）
+  holdover_min_expected_apr: 0.02      # ホールド継続ラインも緩和
   pre_event_open_minutes: 15           # Funding 前何分から仕掛けるか
   hold_across_events: false            # Funding イベントをまたいで保有するか
   rebalance_band_bps: 20.0             # ネットデルタのリバランス帯（bps）
+  min_hold_periods: 6.0
+  taker_fee_bps_roundtrip: 3.0
+  estimated_slippage_bps: 2.0
 
   # Maker チェイス（PostOnly amend）
   chase_enabled: true

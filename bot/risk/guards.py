@@ -5,7 +5,11 @@ import asyncio
 import os  # 環境変数で“フラット時はKILLをスキップ”を制御するため
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
+from typing import (
+    Awaitable,
+    Callable,
+    Iterable,  # noqa: F401 (for future use)
+)
 
 from loguru import logger
 
@@ -56,6 +60,8 @@ class RiskManager:
         flatten_all: Callable[[], Awaitable[None]],
         funding_flip_min_abs: float = 0.0,
         funding_flip_consecutive: int = 1,
+        skip_funding_flip_when_flat: bool = True,
+        is_flat_probe: Callable[[], float | bool] | None = None,
     ) -> None:
         """
         各種しきい値と flatten_all コールバックを受け取って初期化する。
@@ -65,6 +71,8 @@ class RiskManager:
         self._ws_disconnect_threshold_sec = float(ws_disconnect_threshold_sec)
         self._hedge_delay_p95_threshold_sec = float(hedge_delay_p95_threshold_sec)
         self._flatten_all = flatten_all
+        self._skip_funding_flip_when_flat = bool(skip_funding_flip_when_flat)
+        self._is_flat_probe = is_flat_probe
 
         self.disable_new_orders: bool = False
         self._killed: bool = False
@@ -137,8 +145,11 @@ class RiskManager:
             self._funding_flip_counts[symbol] = cnt
             if cnt >= max(1, self._funding_flip_consecutive):
                 self._funding_flip_counts[symbol] = 0
-                # フラットなら Funding 反転による KILL をスキップ（環境変数でON/OFF；既定は有効）
-                if os.getenv("RISK__FUNDING_FLIP_SKIP_WHEN_FLAT", "true").lower() == "true" and self._is_flat_safely():
+                env_skip = os.getenv("RISK__FUNDING_FLIP_SKIP_WHEN_FLAT")
+                skip_when_flat = (
+                    env_skip.lower() == "true" if env_skip is not None else self._skip_funding_flip_when_flat
+                )
+                if skip_when_flat and self._is_flat_safely():
                     logger.info("KILL-SKIP: funding sign flip detected while portfolio is flat -> skip kill")
                     return
                 asyncio.create_task(self._trigger_kill(f"funding sign flip {symbol}: {prev} -> {predicted_rate}"))
@@ -152,6 +163,17 @@ class RiskManager:
         - 利用可能なオブジェクト（portfolio / oms）を順に試す
         - 情報が取れない・例外発生時は False（=フラットではない扱い＝安全側）で返す
         """
+        try:
+            if callable(getattr(self, "_is_flat_probe", None)):
+                val = self._is_flat_probe()  # type: ignore[misc]
+                if isinstance(val, (int, float)):
+                    if abs(float(val)) < 1e-12:
+                        return True
+                else:
+                    return bool(val)
+        except Exception:  # noqa: BLE001
+            pass
+
         try:
             portfolio = getattr(self, "portfolio", None)
             if portfolio is not None:
@@ -179,6 +201,10 @@ class RiskManager:
             pass
 
         return False  # 情報が取れない時は“フラットではない”扱い（安全側）
+
+    def set_flat_probe(self, probe: Callable[[], float | bool]) -> None:
+        """Strategy側からの独自flat判定を注入するためのセッター。"""
+        self._is_flat_probe = probe
 
     # ---------- 実際の KILL スイッチ ----------
 

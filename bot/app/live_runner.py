@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json  # 起動時に ops-check.json を読み、API鍵の事前チェック結果をログ出力するため（importはファイル冒頭に統一）
+import math
 import os
 from typing import Any
 
@@ -36,6 +37,23 @@ from bot.risk.guards import RiskManager
 from bot.strategy.funding_basis.engine import FundingBasisStrategy
 
 _DEBUG_PRIVATE_WS: bool = False  # Private WS のデバッグログ出力フラグ
+
+
+def _price_guard_reason(symbol: str, *, spot_price: float, perp_price: float) -> str | None:
+    """spot/perp 価格が異常なときはスキップするための軽量ガード"""
+
+    def _check(label: str, val: float) -> str | None:
+        try:
+            v = float(val)
+        except Exception:
+            return f"{label}_non_numeric"
+        if not math.isfinite(v):
+            return f"{label}_non_finite"
+        if v <= 0:
+            return f"{label}_non_positive({v})"
+        return None
+
+    return _check("spot", spot_price) or _check("perp", perp_price)
 
 
 def _format_guard_context(_ldict: dict) -> dict:
@@ -331,6 +349,16 @@ async def _strategy_step_once(
         funding = await funding_source.get_funding_info(sym)
         perp_price = await price_source.get_ticker(sym)
         spot_price = await price_source.get_ticker(f"{sym}_SPOT")
+        guard_reason = _price_guard_reason(sym, spot_price=spot_price, perp_price=perp_price)
+        if guard_reason:
+            logger.warning(
+                "price.guard.skip sym={} reason={} spot_price={} perp_price={}",
+                sym,
+                guard_reason,
+                spot_price,
+                perp_price,
+            )
+            continue
         await strategy.step(funding=funding, spot_price=spot_price, perp_price=perp_price)
 
 
@@ -340,7 +368,7 @@ async def _main_async(
     dry_run: bool,
     flatten_on_exit: bool,
     ops_check: bool = False,
-    log_level: str = "INFO",
+    log_level: str = os.getenv("LOG_LEVEL", "INFO"),
     ops_out_csv: str | None = None,
     ops_out_json: str | None = None,
 ) -> None:

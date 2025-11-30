@@ -22,11 +22,14 @@ risk:
 
 strategy:
   symbols: ["BTCUSDT", "ETHUSDT"]
-  min_expected_apr: 0.13  # 新規エントリーに必要な APR（年率）(?1.19bps/8h 相当)
-  holdover_min_expected_apr: 0.10  # 継続保有を許容する APR 下限 (?0.913bps/8h)
+  min_expected_apr: 0.03  # シンプルに緩和: 年率3%閾値（検証モード）
+  holdover_min_expected_apr: 0.02  # ホールド継続ラインも緩和
   pre_event_open_minutes: 15
   hold_across_events: false
   rebalance_band_bps: 20.0
+  min_hold_periods: 6.0
+  taker_fee_bps_roundtrip: 3.0
+  estimated_slippage_bps: 2.0
   chase_min_reprice_bps: 4      # 0.04% 以上の乖離でリプライス
   chase_interval_ms: 2500       # チェイスの最小間隔（ms）
   chase_max_amends_per_min: 6   # 1 分あたりの最大 amend 回数

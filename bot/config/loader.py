@@ -2,6 +2,7 @@
 # 優先順位は「環境変数 > .env > YAML > デフォルト値」となります。
 from __future__ import annotations
 
+import csv
 import os
 import re  # .env内の 'export ' や 'KEY: value' を正規化するために使用
 from io import StringIO  # テキストをストリーム化して python-dotenv に渡すために使用
@@ -155,6 +156,19 @@ def load_config(config_path: str | os.PathLike[str] | None = None) -> AppConfig:
 
     # 5) YAML ベースに環境変数をマージ
     merged = _deep_update(dict(yaml_data), env_data)
+
+    # 5.5) 監視シンボルをCSVで上書き（例: STRATEGY_SYMBOLS_CSV=config/symbols.csv）
+    symbols_csv = Path(os.environ.get("STRATEGY_SYMBOLS_CSV", "config/symbols.csv"))
+    if symbols_csv.exists():
+        try:
+            with symbols_csv.open("r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                symbols = [row[0].strip() for row in reader if row and row[0].strip()]
+            if symbols:
+                merged.setdefault("strategy", {})["symbols"] = symbols
+        except Exception:
+            # CSV読み込み失敗時は何もせずデフォルト/既存設定を使う
+            pass
 
     # 6) AppConfig としてバリデーションしつつインスタンス化
     return AppConfig.from_dict(merged)

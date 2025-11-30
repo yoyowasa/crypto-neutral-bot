@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 from typing import Any
 
 from loguru import logger
@@ -22,6 +23,23 @@ from bot.oms.engine import OmsEngine
 from bot.oms.fill_sim import PaperExchange
 from bot.risk.guards import RiskManager
 from bot.strategy.funding_basis.engine import FundingBasisStrategy
+
+
+def _price_guard_reason(symbol: str, *, spot_price: float, perp_price: float) -> str | None:
+    """spot/perp ���i�Ō�ۓ����������ꍇ�ɃX�L�b�v���鎖�ʁB"""
+
+    def _check(label: str, val: float) -> str | None:
+        try:
+            v = float(val)
+        except Exception:
+            return f"{label}_non_numeric"
+        if not math.isfinite(v):
+            return f"{label}_non_finite"
+        if v <= 0:
+            return f"{label}_non_positive({v})"
+        return None
+
+    return _check("spot", spot_price) or _check("perp", perp_price)
 
 
 @retryable(tries=999999, wait_initial=1.0, wait_max=30.0)
@@ -48,7 +66,10 @@ async def _run_public_ws(
 async def _run(config_path: str | None) -> None:
     """設定・ログ・DB・ゲートウェイ・戦略を初期化し、WS/戦略/メトリクス/レポートを起動する。"""
 
-    setup_logging(level="INFO")
+    import os
+
+    log_level = os.getenv("LOG_LEVEL", "INFO")
+    setup_logging(level=log_level)
     cfg = load_config(config_path)
 
     # DB 接続
@@ -115,6 +136,17 @@ async def _run(config_path: str | None) -> None:
                     # 価格（perp は WS の BBO mid/last、spot は REST フォールバック）
                     perp_price = await paper_ex.get_ticker(sym)
                     spot_price = await paper_ex.get_ticker(f"{sym}_SPOT")
+
+                    guard_reason = _price_guard_reason(sym, spot_price=spot_price, perp_price=perp_price)
+                    if guard_reason:
+                        logger.warning(
+                            "price.guard.skip sym={} reason={} spot_price={} perp_price={}",
+                            sym,
+                            guard_reason,
+                            spot_price,
+                            perp_price,
+                        )
+                        continue
 
                     await strategy.step(
                         funding=funding,

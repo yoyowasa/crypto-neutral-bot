@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import inspect  # 非同期関数検出のため  # 何をする？→ 型ヒント（BBO取得と妥当性チェック用）
 import math  # 何をする？→ 共通刻みによる“切り下げ丸め”で使用
 from dataclasses import dataclass, field
@@ -114,8 +115,8 @@ class FundingBasisStrategy:
         risk_config: RiskConfig,
         strategy_config: StrategyFundingConfig,
         period_seconds: float = 8.0 * 3600.0,
-        taker_fee_bps_roundtrip: float = 6.0,
-        estimated_slippage_bps: float = 5.0,
+        taker_fee_bps_roundtrip: float | None = None,
+        estimated_slippage_bps: float | None = None,
         risk_manager: RiskManager | None = None,
     ) -> None:
         """必要な依存（OMS/設定/リスク管理）を受け取り初期化する。"""
@@ -124,13 +125,20 @@ class FundingBasisStrategy:
         self._risk_config = risk_config
         self._strategy_config = strategy_config
         self._period_seconds = period_seconds
-        self._taker_fee_bps_roundtrip = taker_fee_bps_roundtrip
-        self._estimated_slippage_bps = estimated_slippage_bps
+        self._taker_fee_bps_roundtrip = taker_fee_bps_roundtrip or strategy_config.taker_fee_bps_roundtrip
+        self._estimated_slippage_bps = estimated_slippage_bps or strategy_config.estimated_slippage_bps
+        self._min_hold_periods = getattr(strategy_config, "min_hold_periods", 1.0)
         self._holdings = _Holdings()
         self._risk_manager = risk_manager or RiskManager(
             loss_cut_daily_jpy=risk_config.loss_cut_daily_jpy,
             flatten_all=self.flatten_all,
+            skip_funding_flip_when_flat=True,
         )
+        # リスク側に「フラット判定」プローブを渡して、ポジションが無いときの誤KILLを防ぐ
+        try:
+            self._risk_manager.set_flat_probe(lambda: self._holdings.used_total_notional())
+        except Exception:
+            pass
 
     async def step(
         self,
@@ -152,11 +160,30 @@ class FundingBasisStrategy:
         spot_price: float,
         perp_price: float,
     ) -> Decision:
-        """Funding情報と価格から次のアクションを判定する。"""
+        """Fundingと価格から次のアクションを判定する。"""
+        candidate: float | None = None
+        expected_gain: float | None = None
+        expected_cost: float | None = None
+        time_to_event_min: float | None = None
+        try:
+            if funding.next_funding_time:
+                delta = funding.next_funding_time - datetime.datetime.now(tz=funding.next_funding_time.tzinfo)
+                time_to_event_min = delta.total_seconds() / 60.0
+        except Exception:
+            time_to_event_min = None
 
         symbol = funding.symbol
         if symbol not in self._strategy_config.symbols:
-            return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="対象外シンボル")
+            return self._log_decision(
+                Decision(action=DecisionAction.SKIP, symbol=symbol, reason="対象外シンボル"),
+                symbol=symbol,
+                predicted_rate=funding.predicted_rate,
+                apr=None,
+                candidate=candidate,
+                expected_gain=expected_gain,
+                expected_cost=expected_cost,
+                time_to_event_min=time_to_event_min,
+            )
 
         predicted_rate = funding.predicted_rate
         if predicted_rate is not None:
@@ -172,52 +199,123 @@ class FundingBasisStrategy:
 
         if holding:
             if predicted_rate is None:
-                return Decision(
-                    action=DecisionAction.CLOSE,
+                return self._log_decision(
+                    Decision(
+                        action=DecisionAction.CLOSE,
+                        symbol=symbol,
+                        reason="予想なしのためクローズ",
+                        predicted_apr=None,
+                    ),
                     symbol=symbol,
-                    reason="予想不明のため一旦解消",
-                    predicted_apr=None,
+                    predicted_rate=predicted_rate,
+                    apr=apr,
+                    candidate=candidate,
+                    expected_gain=expected_gain,
+                    expected_cost=expected_cost,
+                    time_to_event_min=time_to_event_min,
                 )
             if predicted_rate <= 0:
-                return Decision(
-                    action=DecisionAction.CLOSE,
+                return self._log_decision(
+                    Decision(
+                        action=DecisionAction.CLOSE,
+                        symbol=symbol,
+                        reason="Funding符号反転でクローズ",
+                        predicted_apr=apr,
+                    ),
                     symbol=symbol,
-                    reason="Funding符号反転でクローズ",
-                    predicted_apr=apr,
+                    predicted_rate=predicted_rate,
+                    apr=apr,
+                    candidate=candidate,
+                    expected_gain=expected_gain,
+                    expected_cost=expected_cost,
+                    time_to_event_min=time_to_event_min,
                 )
-                return Decision(action=DecisionAction.CLOSE, symbol=symbol, reason="APRが閾値未満", predicted_apr=apr)
 
             net_delta = holding.net_delta()
             dominant_qty = holding.dominant_base_qty()
             if dominant_qty > 0:
                 delta_bps = abs(net_delta) / dominant_qty * 10000.0
                 if delta_bps > self._strategy_config.rebalance_band_bps:
-                    return Decision(
-                        action=DecisionAction.HEDGE,
+                    return self._log_decision(
+                        Decision(
+                            action=DecisionAction.HEDGE,
+                            symbol=symbol,
+                            reason="デルタ乖離によりヘッジ",
+                            predicted_apr=apr,
+                            delta_to_neutral=-net_delta,
+                        ),
                         symbol=symbol,
-                        reason="デルタ乖離により再ヘッジ",
-                        predicted_apr=apr,
-                        delta_to_neutral=-net_delta,
+                        predicted_rate=predicted_rate,
+                        apr=apr,
+                        candidate=candidate,
+                        expected_gain=expected_gain,
+                        expected_cost=expected_cost,
+                        time_to_event_min=time_to_event_min,
                     )
 
-            return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="ホールド継続", predicted_apr=apr)
+            return self._log_decision(
+                Decision(action=DecisionAction.SKIP, symbol=symbol, reason="ホールド継続", predicted_apr=apr),
+                symbol=symbol,
+                predicted_rate=predicted_rate,
+                apr=apr,
+                candidate=candidate,
+                expected_gain=expected_gain,
+                expected_cost=expected_cost,
+                time_to_event_min=time_to_event_min,
+            )
 
         if self._risk_manager.disable_new_orders:
-            return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="リスク管理で新規停止", predicted_apr=apr)
+            return self._log_decision(
+                Decision(action=DecisionAction.SKIP, symbol=symbol, reason="リスク管理で新規停止", predicted_apr=apr),
+                symbol=symbol,
+                predicted_rate=predicted_rate,
+                apr=apr,
+                candidate=candidate,
+                expected_gain=expected_gain,
+                expected_cost=expected_cost,
+                time_to_event_min=time_to_event_min,
+            )
 
         if predicted_rate is None:
-            return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="Funding予想が取得できない")
+            return self._log_decision(
+                Decision(action=DecisionAction.SKIP, symbol=symbol, reason="Funding予想が取得できない"),
+                symbol=symbol,
+                predicted_rate=predicted_rate,
+                apr=apr,
+                candidate=candidate,
+                expected_gain=expected_gain,
+                expected_cost=expected_cost,
+                time_to_event_min=time_to_event_min,
+            )
 
         if predicted_rate <= 0:
-            return Decision(
-                action=DecisionAction.SKIP,
+            return self._log_decision(
+                Decision(
+                    action=DecisionAction.SKIP,
+                    symbol=symbol,
+                    reason="負のFundingは新規対象外",
+                    predicted_apr=apr,
+                ),
                 symbol=symbol,
-                reason="負のFundingは新規対象外",
-                predicted_apr=apr,
+                predicted_rate=predicted_rate,
+                apr=apr,
+                candidate=candidate,
+                expected_gain=expected_gain,
+                expected_cost=expected_cost,
+                time_to_event_min=time_to_event_min,
             )
 
         if apr is not None and apr < self._strategy_config.min_expected_apr:
-            return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="APRがしきい値未満", predicted_apr=apr)
+            return self._log_decision(
+                Decision(action=DecisionAction.SKIP, symbol=symbol, reason="APRが閾値未満", predicted_apr=apr),
+                symbol=symbol,
+                predicted_rate=predicted_rate,
+                apr=apr,
+                candidate=candidate,
+                expected_gain=expected_gain,
+                expected_cost=expected_cost,
+                time_to_event_min=time_to_event_min,
+            )
 
         used_total = self._holdings.used_total_notional()
         used_symbol = self._holdings.used_symbol_notional(symbol)
@@ -227,28 +325,85 @@ class FundingBasisStrategy:
             used_symbol_notional=used_symbol,
         )
         if candidate <= 0:
-            return Decision(
-                action=DecisionAction.SKIP,
+            return self._log_decision(
+                Decision(
+                    action=DecisionAction.SKIP,
+                    symbol=symbol,
+                    reason="利用可能な名目なし",
+                    predicted_apr=apr,
+                ),
                 symbol=symbol,
-                reason="名目上限により建て不可",
-                predicted_apr=apr,
+                predicted_rate=predicted_rate,
+                apr=apr,
+                candidate=candidate,
+                expected_gain=expected_gain,
+                expected_cost=expected_cost,
+                time_to_event_min=time_to_event_min,
             )
 
-        expected_gain = predicted_rate * candidate
+        expected_gain = predicted_rate * candidate * self._min_hold_periods
         total_cost_bps = self._taker_fee_bps_roundtrip + self._estimated_slippage_bps
         expected_cost = candidate * total_cost_bps / 10000.0
         if expected_gain <= expected_cost:
-            return Decision(action=DecisionAction.SKIP, symbol=symbol, reason="期待収益がコスト未満", predicted_apr=apr)
+            return self._log_decision(
+                Decision(action=DecisionAction.SKIP, symbol=symbol, reason="期待収益がコスト未満", predicted_apr=apr),
+                symbol=symbol,
+                predicted_rate=predicted_rate,
+                apr=apr,
+                candidate=candidate,
+                expected_gain=expected_gain,
+                expected_cost=expected_cost,
+                time_to_event_min=time_to_event_min,
+            )
 
-        return Decision(
-            action=DecisionAction.OPEN,
+        return self._log_decision(
+            Decision(
+                action=DecisionAction.OPEN,
+                symbol=symbol,
+                reason="Funding期待が十分なため新規建て",
+                predicted_apr=apr,
+                notional=candidate,
+                perp_side="sell",
+                spot_side="buy",
+            ),
             symbol=symbol,
-            reason="Funding機会により新規建て",
-            predicted_apr=apr,
-            notional=candidate,
-            perp_side="sell",
-            spot_side="buy",
+            predicted_rate=predicted_rate,
+            apr=apr,
+            candidate=candidate,
+            expected_gain=expected_gain,
+            expected_cost=expected_cost,
+            time_to_event_min=time_to_event_min,
         )
+
+    def _log_decision(
+        self,
+        decision: Decision,
+        *,
+        symbol: str,
+        predicted_rate: float | None,
+        apr: float | None,
+        candidate: float | None,
+        expected_gain: float | None,
+        expected_cost: float | None,
+        time_to_event_min: float | None,
+    ) -> Decision:
+        """evaluate の判定内容をデバッグ出力する。"""
+        try:
+            logger.debug(
+                "decide sym={} act={} reason={} prate={} apr={} cand={} gain={} cost={} tmin={}",
+                symbol,
+                decision.action.value,
+                decision.reason,
+                predicted_rate,
+                apr,
+                candidate,
+                expected_gain,
+                expected_cost,
+                time_to_event_min,
+            )
+        except Exception:
+            pass
+        return decision
 
     async def execute(self, decision: Decision, *, spot_price: float, perp_price: float) -> None:
         """Evaluateで得たアクションを実際の発注へ変換する。"""
@@ -442,21 +597,31 @@ class FundingBasisStrategy:
             scale_info = getattr(gw, "_scale_cache", {}).get(symbol) or {}
         except Exception:
             scale_info = {}
-        if scale_info.get("priceScale") is None:
-            return False, "price_scale_not_ready"
+        ready_scale = scale_info.get("priceScale") is not None
+        scale_keys = []
+        try:
+            scale_keys = sorted(getattr(gw, "_scale_cache", {}).keys())
+        except Exception:
+            scale_keys = []
 
-        # 価格ガードの状態チェック（READY以外は見送る：FROZEN/NO_ANCHOR/UNKNOWNなど）
         try:
             state = getattr(gw, "_price_state", {}).get(symbol, "UNKNOWN")
         except Exception:
             state = "UNKNOWN"
-        if state != "READY":
-            return False, f"price_state={state}"
+        ready_state = state == "READY"
 
-        # 何をする？→ BBO（最良気配）の常識性チェック（同値・逆転・非正を弾く）
         bid, ask = self._get_bbo(symbol)
-        if not self._is_bbo_valid(bid, ask):
-            return False, "bbo_invalid"
+        ready_bbo = self._is_bbo_valid(bid, ask)
+
+        if not ready_scale:
+            return (
+                False,
+                f"price_scale_not_ready scale_meta={ready_scale} bbo={ready_bbo} state={state} cache_keys={scale_keys}",
+            )
+        if not ready_state:
+            return False, f"price_state={state} scale_meta={ready_scale} bbo={ready_bbo} cache_keys={scale_keys}"
+        if not ready_bbo:
+            return False, f"bbo_invalid scale_meta={ready_scale} state={state} cache_keys={scale_keys}"
 
         return True, "OK"  # READY：発注してよい
 

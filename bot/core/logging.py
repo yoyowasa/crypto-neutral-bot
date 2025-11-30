@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging  # 標準logging→loguru(JSONL)ブリッジ用
+import os
 import re
 import sys
 from pathlib import Path
 from types import FrameType
+from typing import Iterable
 
 from loguru import logger
 
@@ -49,6 +51,35 @@ ORDER_PROMOTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"position\.(open|increase|decrease|close|update)", re.IGNORECASE),
     re.compile(r"(fill|executed|trade_id|約定|成交)", re.IGNORECASE),
 )
+
+
+def _parse_debug_modules(raw: str | Iterable[str] | None) -> tuple[str, ...]:
+    """LOG_DEBUG_MODULES �ȂǂőΏۃ��W���[�����w�肷��p�b�`�B"""
+
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        items = [x.strip() for x in raw.split(",")]
+    else:
+        items = [str(x).strip() for x in raw]
+    return tuple(x for x in items if x)
+
+
+def _level_filter_factory(base_level_no: int, debug_modules: tuple[str, ...]):
+    """�f�t�H���gINFO�ł�debug_modules�̂�DEBUG��A�b�v���A���̕ς݂͏���B"""
+
+    debug_no = logger.level("DEBUG").no
+
+    def _filter(record: dict) -> bool:
+        level_no = record["level"].no
+        if level_no >= base_level_no:
+            return True
+        if level_no == debug_no and debug_modules:
+            name = record["extra"].get("origin") or record.get("name")
+            return any(name and name.startswith(m) for m in debug_modules)
+        return False
+
+    return _filter
 
 
 class InterceptHandler(logging.Handler):
@@ -118,12 +149,13 @@ def setup_logging(
     log_dir: str = "logs",
     human_filename: str = "app.log",
     json_filename: str = "app.jsonl",
+    debug_modules: Iterable[str] | None = None,
 ) -> None:
     """Initialize logging files and console.
 
     Adds two rotating file sinks under `log_dir`:
-      1) Human-readable: logs/app.log (rotated daily at UTC midnight)
-      2) JSON structured: logs/app.jsonl (rotated daily at UTC midnight)
+      1) Human-readable: logs/app.log (rotated by size, keep ~10 files)
+      2) JSON structured: logs/app.jsonl (rotated by size, keep ~10 files)
     """
     logger.configure(patcher=_inject_origin)  # type: ignore[arg-type]
     logger.remove()
@@ -132,36 +164,51 @@ def setup_logging(
     log_path.mkdir(parents=True, exist_ok=True)
 
     normalized_level = level.upper()
+    try:
+        base_level_no = logger.level(normalized_level).no
+    except ValueError:
+        base_level_no = logger.level("INFO").no
+    debug_modules_raw = debug_modules if debug_modules is not None else os.getenv("LOG_DEBUG_MODULES")
+    debug_modules_tuple = _parse_debug_modules(debug_modules_raw)
+    level_filter = _level_filter_factory(base_level_no, debug_modules_tuple)
 
     human_format = (
         "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
         "<level>{level: <8}</level> | {name}:{function}:{line} | {message}"
     )
 
-    # Human-readable log (rotate daily at UTC midnight)
+    # JSTで日次ローテーション
+    human_rotation = "00:00"
+    json_rotation = "00:00"
+    human_retention = 10  # �ő�10�t�@�C���ʂ�ho���Ȃ��߂̃��[�e�B�V����
+    json_retention = 10
+
+    # Human-readable log (size rotation)
     logger.add(
         str(log_path / human_filename),
-        level=normalized_level,
-        rotation="00:00",
-        retention="14 days",
+        level="DEBUG",
+        rotation=human_rotation,
+        retention=human_retention,
         enqueue=True,
         backtrace=True,
         diagnose=False,
         encoding="utf-8",
         format=human_format,
+        filter=level_filter,
     )
 
-    # JSON structured log (rotate daily at UTC midnight)
+    # JSON structured log (size rotation)
     logger.add(
         str(log_path / json_filename),
-        level=normalized_level,
-        rotation="00:00",
-        retention="30 days",
+        level="DEBUG",
+        rotation=json_rotation,
+        retention=json_retention,
         enqueue=True,
         backtrace=True,
         diagnose=False,
         encoding="utf-8",
         serialize=True,
+        filter=level_filter,
     )
     apply_loguru_patcher()  # JSONLシンク設定直後にorigin*自動付与を有効化
 
@@ -170,10 +217,20 @@ def setup_logging(
     # Console sink (stdout)
     logger.add(
         sys.stdout,
-        level=normalized_level,
+        level="DEBUG",
         backtrace=True,
         diagnose=False,
         format=human_format,
+        filter=level_filter,
     )
 
-    logger.info("logging initialized: level={}, dir={}", normalized_level, log_dir)
+    logger.info(
+        "logging init level={} dir={} mods={} rot_human={} rot_json={} ret_human={} ret_json={}",
+        normalized_level,
+        log_dir,
+        debug_modules_tuple,
+        human_rotation,
+        json_rotation,
+        human_retention,
+        json_retention,
+    )
