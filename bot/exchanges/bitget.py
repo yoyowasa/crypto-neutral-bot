@@ -368,6 +368,12 @@ class BitgetGateway(ExchangeGateway):
         self._ws_ping_timeout = _safe_float(os.getenv("WS_PING_TIMEOUT")) or self._ws_ping_timeout
         self._ws_idle_timeout = _safe_float(os.getenv("WS_IDLE_TIMEOUT")) or self._ws_idle_timeout
 
+        # 生成時の gw_id を必ず残す
+        try:
+            loguru_logger.info("bitget.init gw_id={}", id(self))
+        except Exception:
+            pass
+
         # --- REST (ccxt) ---
         # Bitget は defaultType="swap", options["uta"]=True で UTA を使う前提。
         self._ccxt = ccxt.bitget(
@@ -502,11 +508,12 @@ class BitgetGateway(ExchangeGateway):
             self._scale_cache[core] = info
             try:
                 loguru_logger.info(
-                    "bitget.scale.prime.ok sym={} core={} scale={} keys={}",
+                    "bitget.scale.prime.ok sym={} core={} scale={} keys={} gw_id={}",
                     symbol,
                     core,
                     info.get("priceScale"),
                     sorted(self._scale_cache.keys()),
+                    id(self),
                 )
             except Exception:
                 pass

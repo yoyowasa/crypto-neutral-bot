@@ -378,6 +378,7 @@ async def _main_async(
 
     setup_logging(level=log_level)
     cfg = load_config(cfg_path)
+    logger.info("live_runner mark=v3 file={} gw_id_log_ready", __file__)
 
     global _DEBUG_PRIVATE_WS
     env_flag = os.environ.get("DEBUG_PRIVATE_WS") or os.environ.get("EXCHANGE__DEBUG_PRIVATE_WS")
@@ -405,30 +406,34 @@ async def _main_async(
     if repo is not None:
         await repo.create_all()
 
-    # 実データ源（REST）。dry-run でもデータ源として使用（Bitget）
-    data_ex = BitgetGateway(
+    # データ取得/REST/BBO用 (Bitget)。dry-run でも共用
+    # BitgetGateway は1つだけ生成し、REST/BBO/WS/戦略/メトリクスで共有する
+    bitget_ex = BitgetGateway(
         api_key=cfg.keys.api_key,
         api_secret=cfg.keys.api_secret,
         passphrase=cfg.keys.passphrase,
         environment=exchange_env,
         use_uta=getattr(cfg.exchange, "use_uta", True),
     )
-    if hasattr(data_ex, "_debug_private_ws"):
-        data_ex._debug_private_ws = _DEBUG_PRIVATE_WS
+    logger.info("live_runner bitget_ex gw_id={}", id(bitget_ex))
+    if hasattr(bitget_ex, "_debug_private_ws"):
+        bitget_ex._debug_private_ws = _DEBUG_PRIVATE_WS
     # --- 設定の適用：BitgetGateway（REST/BBO/価格ガード） ---
-    data_ex._bbo_max_age_ms = cfg.exchange.bbo_max_age_ms  # BBO鮮度ガード（STEP28）
-    data_ex._rest_max_concurrency = cfg.exchange.rest_max_concurrency  # REST同時実行上限（STEP29）
-    data_ex._rest_semaphore = asyncio.Semaphore(data_ex._rest_max_concurrency)  # 新しい上限でセマフォを再構築
-    if hasattr(data_ex, "_rest_cb_fail_threshold"):
-        data_ex._rest_cb_fail_threshold = cfg.exchange.rest_cb_fail_threshold  # サーキット連続失敗回数（STEP31）
-    if hasattr(data_ex, "_rest_cb_open_seconds"):
-        data_ex._rest_cb_open_seconds = cfg.exchange.rest_cb_open_seconds  # サーキット休止秒（STEP31）
-    if hasattr(data_ex, "_instrument_info_ttl_s"):
-        data_ex._instrument_info_ttl_s = cfg.exchange.instrument_info_ttl_s  # instruments-infoのTTL（秒）
-    if hasattr(data_ex, "_price_dev_bps_limit"):
-        data_ex._price_dev_bps_limit = cfg.risk.price_dev_bps_limit  # 価格逸脱ガード[bps]（STEP34）
+    bitget_ex._bbo_max_age_ms = cfg.exchange.bbo_max_age_ms  # BBO猶予ガード（STEP28）
+    bitget_ex._rest_max_concurrency = cfg.exchange.rest_max_concurrency  # REST同時実行上限（STEP29）
+    bitget_ex._rest_semaphore = asyncio.Semaphore(bitget_ex._rest_max_concurrency)  # セマフォで制御
+    if hasattr(bitget_ex, "_rest_cb_fail_threshold"):
+        bitget_ex._rest_cb_fail_threshold = cfg.exchange.rest_cb_fail_threshold  # サーキットブレーカ閾値（STEP31）
+    if hasattr(bitget_ex, "_rest_cb_open_seconds"):
+        bitget_ex._rest_cb_open_seconds = cfg.exchange.rest_cb_open_seconds  # サーキット閾値（STEP31）
+    if hasattr(bitget_ex, "_instrument_info_ttl_s"):
+        bitget_ex._instrument_info_ttl_s = cfg.exchange.instrument_info_ttl_s  # instruments-infoのTTL秒
+    if hasattr(bitget_ex, "_price_dev_bps_limit"):
+        bitget_ex._price_dev_bps_limit = cfg.risk.price_dev_bps_limit  # 価格乖離ガード[bps]（STEP34）
 
-    # 健診モード：各シンボルの Funding / BBO / 認証REST（open orders）を点検して終了する
+    # データ取得も同インスタンス
+    data_ex = bitget_ex
+
     if ops_check:
         syms = list(getattr(cfg.strategy, "symbols", []))
         # Use already imported classes; keep local stdlib imports only
@@ -461,6 +466,7 @@ async def _main_async(
             taker_fee_bps_roundtrip=taker_bps,
             estimated_slippage_bps=slip_bps,
             risk_manager=rm_ops,
+            primary_gateway=data_ex,
         )
 
         # 理由文字列の文字化けを簡易補正（戦略側の固定文の既知パターン）
@@ -603,47 +609,28 @@ async def _main_async(
                 logger.warning("ops.export json failed: {}", e)
         return
 
-    # 発注先（dry-run は PaperExchange、live は BitgetGateway）
+    # 発注先（dry-run は PaperExchange、live は共有BitgetGateway）
     if dry_run:
         trade_ex: ExchangeGateway = PaperExchange(data_source=data_ex, initial_usdt=100_000.0)
         oms = OmsEngine(ex=trade_ex, repo=repo, cfg=None)
-        # --- 設定の適用：OMS（WS古さブロック、STEP32） ---
+        # --- 設定の適用：OMS（WSスタレブロック：STEP32） ---
         oms._ws_stale_block_ms = cfg.risk.ws_stale_block_ms
-        # --- 設定の適用：REJECT連発→シンボル一時停止（STEP37） ---
+        # --- 設定の適用：REJECT/クールダウン閾値（STEP37） ---
         oms._reject_burst_threshold = cfg.risk.reject_burst_threshold
         oms._reject_window_ms = cfg.risk.reject_burst_window_s * 1000
         oms._symbol_cooldown_ms = cfg.risk.symbol_cooldown_s * 1000
         assert isinstance(trade_ex, PaperExchange)
         trade_ex.bind_oms(oms)
     else:
-        trade_ex = BitgetGateway(
-            api_key=cfg.keys.api_key,
-            api_secret=cfg.keys.api_secret,
-            passphrase=cfg.keys.passphrase,
-            environment=exchange_env,
-            use_uta=getattr(cfg.exchange, "use_uta", True),
-        )
-        if hasattr(trade_ex, "_debug_private_ws"):
-            trade_ex._debug_private_ws = _DEBUG_PRIVATE_WS
-        # --- 設定の適用：BitgetGateway（REST/BBO/価格ガード） ---
-        trade_ex._bbo_max_age_ms = cfg.exchange.bbo_max_age_ms  # BBO鮮度ガード（STEP28）
-        trade_ex._rest_max_concurrency = cfg.exchange.rest_max_concurrency  # REST同時実行上限（STEP29）
-        trade_ex._rest_semaphore = asyncio.Semaphore(trade_ex._rest_max_concurrency)  # 新しい上限でセマフォを再構築
-        if hasattr(trade_ex, "_rest_cb_fail_threshold"):
-            trade_ex._rest_cb_fail_threshold = cfg.exchange.rest_cb_fail_threshold  # サーキット連続失敗回数（STEP31）
-        if hasattr(trade_ex, "_rest_cb_open_seconds"):
-            trade_ex._rest_cb_open_seconds = cfg.exchange.rest_cb_open_seconds  # サーキット休止秒（STEP31）
-        if hasattr(trade_ex, "_instrument_info_ttl_s"):
-            trade_ex._instrument_info_ttl_s = cfg.exchange.instrument_info_ttl_s  # instruments-infoのTTL（秒）
-        if hasattr(trade_ex, "_price_dev_bps_limit"):
-            trade_ex._price_dev_bps_limit = cfg.risk.price_dev_bps_limit  # 価格逸脱ガード[bps]（STEP34）
+        trade_ex = bitget_ex
         oms = OmsEngine(ex=trade_ex, repo=repo, cfg=None)
-        # --- 設定の適用：OMS（WS古さブロック、STEP32） ---
+        # --- 設定の適用：OMS（WSスタレブロック：STEP32） ---
         oms._ws_stale_block_ms = cfg.risk.ws_stale_block_ms
-        # --- 設定の適用：REJECT連発→シンボル一時停止（STEP37） ---
+        # --- 設定の適用：REJECT/クールダウン閾値（STEP37） ---
         oms._reject_burst_threshold = cfg.risk.reject_burst_threshold
         oms._reject_window_ms = cfg.risk.reject_burst_window_s * 1000
         oms._symbol_cooldown_ms = cfg.risk.symbol_cooldown_s * 1000
+        logger.info("live_runner trade_ex gw_id={}", id(trade_ex))
 
     # RiskManager（flatten_all の実体は strategy 経由にする）
     strategy_holder: dict[str, Any] = {}
@@ -672,6 +659,7 @@ async def _main_async(
     # Strategy
     taker_bps = float(os.environ.get("STRATEGY__TAKER_FEE_BPS_ROUNDTRIP", "6.0") or 6.0)
     slip_bps = float(os.environ.get("STRATEGY__ESTIMATED_SLIPPAGE_BPS", "5.0") or 5.0)
+    logger.info("strategy ctor about to pass primary_gateway_id={}", id(bitget_ex))
     strategy = FundingBasisStrategy(
         oms=oms,
         risk_config=cfg.risk,
@@ -680,6 +668,7 @@ async def _main_async(
         taker_fee_bps_roundtrip=taker_bps,
         estimated_slippage_bps=slip_bps,
         risk_manager=rm,
+        primary_gateway=bitget_ex,
     )
     strategy_holder["strategy"] = strategy
 
@@ -740,17 +729,12 @@ async def _main_async(
     except asyncio.CancelledError:
         pass
     finally:
-        # ccxt リソース解放
+        # ccxt リソース閉じ（共有GWは重複クローズ回避）
         try:
-            close_fn = getattr(trade_ex, "close", None)
-            if callable(close_fn):
-                await close_fn()  # ccxt async close で警告抑制
-        except Exception:
-            pass
-        try:
-            close_fn = getattr(data_ex, "close", None)
-            if callable(close_fn):
-                await close_fn()
+            for ex in {trade_ex, data_ex}:
+                close_fn = getattr(ex, "close", None)
+                if callable(close_fn):
+                    await close_fn()
         except Exception:
             pass
         if flatten_on_exit:

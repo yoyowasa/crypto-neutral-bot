@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import datetime
-import inspect  # 非同期関数検出のため  # 何をする？→ 型ヒント（BBO取得と妥当性チェック用）
+import inspect  # FundingBasisStrategyがどこから呼ばれているか(呼び出し元スタック)を調べるために使う標準ライブラリ
 import math  # 何をする？→ 共通刻みによる“切り下げ丸め”で使用
+import types  # primary_gatewayがSimpleNamespaceでラップされている場合に中の本物のBitgetGatewayを取り出すために使う
 from dataclasses import dataclass, field
 from typing import Any, Optional, Tuple
 
@@ -118,10 +119,37 @@ class FundingBasisStrategy:
         taker_fee_bps_roundtrip: float | None = None,
         estimated_slippage_bps: float | None = None,
         risk_manager: RiskManager | None = None,
+        primary_gateway: Any | None = None,
     ) -> None:
         """必要な依存（OMS/設定/リスク管理）を受け取り初期化する。"""
 
         self._oms = oms
+        if primary_gateway is None and hasattr(oms, "_ex"):
+            primary_gateway = oms._ex
+        # primary_gatewayがSimpleNamespaceなどのラッパーになっている場合に、中に入っている本物のBitgetGatewayを取り出す
+        pg = primary_gateway  # 作業用変数に一度コピーする
+        if isinstance(pg, types.SimpleNamespace):
+            # SimpleNamespaceで2重ラップされているケースに対応する
+            visited_ids = set()  # 無限ループ防止のため、たどったオブジェクトIDを覚えておく
+            while isinstance(pg, types.SimpleNamespace) and id(pg) not in visited_ids:
+                visited_ids.add(id(pg))
+                # 一番内側にいる本物のゲートウェイ候補(inner_gw)を優先して探す
+                if hasattr(pg, "inner_gw"):
+                    pg = pg.inner_gw
+                    break  # inner_gwを見つけたらそこでunwrap終了
+                # outer_wrapperがさらに内側のラッパを指しているケース
+                if hasattr(pg, "outer_wrapper"):
+                    pg = pg.outer_wrapper
+                    continue
+                # 一般的なラッパが._exの下に本物のゲートウェイを持っているケース
+                if hasattr(pg, "_ex"):
+                    pg = pg._ex
+                    continue
+                # これ以上たどれない場合はループを抜ける
+                break
+            primary_gateway = pg  # unwrap後のオブジェクトを新しいprimary_gatewayとする
+
+        self._primary_gateway = primary_gateway
         self._risk_config = risk_config
         self._strategy_config = strategy_config
         self._period_seconds = period_seconds
@@ -134,6 +162,37 @@ class FundingBasisStrategy:
             flatten_all=self.flatten_all,
             skip_funding_flip_when_flat=True,
         )
+        self._gw_log_once: set[str] = set()
+        self._last_gw_used: dict[str, int] = {}
+        # 戦略が最終的に掴んだprimary_gatewayの正体と、その中にBitgetGatewayが隠れていないかを調べるためのログ
+        try:
+            caller_frame = inspect.stack()[1]  # FundingBasisStrategy.__init__を呼び出した1つ上のフレーム情報を取得する
+            # 呼び出し元の関数名/ファイル名/行番号を文字列にまとめる
+            caller_info = f"{caller_frame.function}@{caller_frame.filename}:{caller_frame.lineno}"
+        except Exception:
+            caller_info = "unknown"
+
+        underlying = getattr(
+            self._primary_gateway, "_ex", None
+        )  # primary_gatewayがさらに._exという属性で中に本物のゲートウェイを持っていないか調べる
+
+        try:
+            init_msg = (
+                "strategy.init primary_gateway type={} obj_id={} gw_id_attr={} "
+                "underlying_type={} underlying_obj_id={} underlying_gw_id_attr={} caller={}"
+            )
+            logger.info(
+                init_msg,
+                type(self._primary_gateway),
+                hex(id(self._primary_gateway)) if self._primary_gateway is not None else None,
+                getattr(self._primary_gateway, "gw_id", None),
+                type(underlying),
+                hex(id(underlying)) if underlying is not None else None,
+                getattr(underlying, "gw_id", None) if underlying is not None else None,
+                caller_info,
+            )
+        except Exception:
+            pass
         # リスク側に「フラット判定」プローブを渡して、ポジションが無いときの誤KILLを防ぐ
         try:
             self._risk_manager.set_flat_probe(lambda: self._holdings.used_total_notional())
@@ -445,6 +504,7 @@ class FundingBasisStrategy:
         """新規でFunding/Basisポジションを組成する。"""
 
         # 何をする？→ OPENの直前に“市場データがREADYか”を確認し、ダメなら安全にスキップする
+        await self._prime_market_metadata(decision.symbol)
         ready, reason = self._market_data_ready(decision.symbol)
         if not ready:
             logger.info("decision.skip: market data not ready sym={} reason={}", decision.symbol, reason)
@@ -564,41 +624,68 @@ class FundingBasisStrategy:
 
         self._holdings.clear(symbol)
 
-    def _market_data_ready(self, symbol: str) -> Tuple[bool, str]:
-        """何をする関数？→ 価格スケールと価格ガードの状態を調べ、発注してよいか（READYか）を判定する。"""
+    def _locate_gateway_with_scale(self) -> Any | None:
+        """スケール情報を持つゲートウェイを探して返す。"""
 
-        # ゲートウェイ（BitgetGatewayなど）を“ていねいに探す”（属性名の揺れを吸収）
-        gw: Any | None = None
         try:
-            for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex"):
-                cand = getattr(self, name, None)
-                if cand is not None and hasattr(cand, "_scale_cache"):
-                    gw = cand
-                    break
-            # 直接見つからなければ OMS 経由でも探す
-            if gw is None:
-                oms = getattr(self, "_oms", None)
-                if oms is not None:
-                    for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex", "_ex"):
-                        cand = getattr(oms, name, None)
-                        if cand is None and hasattr(oms, "_ex"):
-                            cand = getattr(oms, "_ex", None)
-                        if cand is not None and hasattr(cand, "_scale_cache"):
-                            gw = cand
-                            break
+            if self._primary_gateway is not None and hasattr(self._primary_gateway, "_scale_cache"):
+                return self._primary_gateway
+
+            cands: list[Any] = []
+
+            def _push(owner: Any) -> None:
+                for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex", "_ex"):
+                    cand = getattr(owner, name, None)
+                    if cand is None:
+                        continue
+                    if hasattr(cand, "_scale_cache"):
+                        cands.append(cand)
+
+            _push(self)
+            oms = getattr(self, "_oms", None)
+            if oms is not None:
+                _push(oms)
+
+            # 優先度: _prime_scale_from_markets を持つ -> _scale_cacheにpriceScaleが入っている -> 先頭
+            def _score(obj: Any) -> tuple[int, int]:
+                has_prime = int(bool(getattr(obj, "_prime_scale_from_markets", None)))
+                cache = getattr(obj, "_scale_cache", {}) or {}
+                has_price = 1 if any((info or {}).get("priceScale") is not None for info in cache.values()) else 0
+                return (has_prime, has_price)
+
+            cands.sort(key=_score, reverse=True)
+            return cands[0] if cands else None
         except Exception:
-            gw = None
+            return None
 
+    def _market_data_ready(self, symbol: str) -> Tuple[bool, str]:
+        """内部用: 価格スケール/BBOの準備状態をチェックしてREADY/理由を返す。"""
+
+        gw_cache = getattr(self, "_gw_cache", {})
+        gw: Any | None = gw_cache.get(symbol) if isinstance(gw_cache, dict) else None
         if gw is None:
-            return False, "no_gateway"  # ゲートウェイが見つからない→発注は安全に見送る
+            gw = self._locate_gateway_with_scale()
+        if gw is None:
+            return False, "no_gateway"  # ゲートウェイが見つからない場合は早期に諦める
+        try:
+            gid = id(gw)
+            if self._last_gw_used.get(symbol) != gid:
+                self._last_gw_used[symbol] = gid
+                logger.info(
+                    "market_ready.gw sym={} gw_id={} cache_keys={} state={}",
+                    symbol,
+                    gid,
+                    sorted(getattr(gw, "_scale_cache", {}).keys()),
+                    getattr(gw, "_price_state", {}).get(symbol, "UNKNOWN"),
+                )
+        except Exception:
+            pass
 
-        # スケール準備チェック（priceScaleが未準備ならダメ）
         try:
             scale_info = getattr(gw, "_scale_cache", {}).get(symbol) or {}
         except Exception:
             scale_info = {}
         ready_scale = scale_info.get("priceScale") is not None
-        scale_keys = []
         try:
             scale_keys = sorted(getattr(gw, "_scale_cache", {}).keys())
         except Exception:
@@ -616,19 +703,78 @@ class FundingBasisStrategy:
         if not ready_scale:
             return (
                 False,
-                f"price_scale_not_ready scale_meta={ready_scale} bbo={ready_bbo} state={state} cache_keys={scale_keys}",
+                (
+                    f"price_scale_not_ready scale_meta={ready_scale} bbo={ready_bbo} "
+                    f"state={state} cache_keys={scale_keys} gw_id={id(gw)}"
+                ),
             )
         if not ready_state:
-            return False, f"price_state={state} scale_meta={ready_scale} bbo={ready_bbo} cache_keys={scale_keys}"
+            return False, (
+                f"price_state={state} scale_meta={ready_scale} bbo={ready_bbo} "
+                f"cache_keys={scale_keys} gw_id={id(gw)}"
+            )
         if not ready_bbo:
-            return False, f"bbo_invalid scale_meta={ready_scale} state={state} cache_keys={scale_keys}"
+            return False, (f"bbo_invalid scale_meta={ready_scale} state={state} cache_keys={scale_keys} gw_id={id(gw)}")
 
-        return True, "OK"  # READY：発注してよい
+        return True, "OK"  # READY: 問題なければ通す
+
+    async def _prime_market_metadata(self, symbol: str) -> None:
+        """スケール/価格状態が未初期化ならここで温める。"""
+
+        gw = self._locate_gateway_with_scale()
+        if gw is None:
+            return
+
+        try:
+            if symbol not in self._gw_log_once:
+                self._gw_log_once.add(symbol)
+                logger.info(
+                    "prime.meta.start sym={} gw_id={} cache_keys={}",
+                    symbol,
+                    id(gw),
+                    sorted(getattr(gw, "_scale_cache", {}).keys()),
+                )
+        except Exception:
+            pass
+
+        try:
+            scale_info = getattr(gw, "_scale_cache", {}).get(symbol) or {}
+            ready_scale = scale_info.get("priceScale") is not None
+        except Exception:
+            ready_scale = False
+
+        if not ready_scale:
+            prime = getattr(gw, "_prime_scale_from_markets", None)
+            if prime and inspect.iscoroutinefunction(prime):
+                try:
+                    await prime(symbol)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("prime.scale.error sym={} err={}", symbol, e)
+
+        try:
+            state = getattr(gw, "_price_state", {}).get(symbol)
+        except Exception:
+            state = None
+        if state != "READY":
+            get_bbo = getattr(gw, "get_bbo", None)
+            if get_bbo and inspect.iscoroutinefunction(get_bbo):
+                try:
+                    await get_bbo(symbol)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("prime.bbo.error sym={} err={}", symbol, e)
+        try:
+            cache = getattr(self, "_gw_cache", None)
+            if not isinstance(cache, dict):
+                cache = {}
+            cache[symbol] = gw
+            self._gw_cache = cache
+        except Exception:
+            pass
 
     def _get_bbo(self, symbol: str) -> Tuple[Optional[float], Optional[float]]:
-        """何をする関数？→ 現在の最良気配(BBO)を“ていねいに探して” (bid, ask) を返す。見つからなければ (None, None)。"""
+        """内部用補助関数。 現在の最良気配(BBO)を取れる範囲で返す。なければ (None, None)。"""
 
-        # 1) Strategy自身に get_bbo があれば使う
+        # 1) Strategy自身が get_bbo を持つなら優先的に使う
         if hasattr(self, "get_bbo"):
             try:
                 b = self.get_bbo(symbol)
@@ -642,7 +788,7 @@ class FundingBasisStrategy:
             except Exception:
                 pass
 
-        # 2) よくある集約器（market / md）に get_bbo があれば使う
+        # 2) 共通コンポーネント(market / md)が get_bbo を持っていれば使う
         for comp_name in ("market", "md"):
             comp = getattr(self, comp_name, None)
             if comp is not None and hasattr(comp, "get_bbo"):
@@ -658,81 +804,22 @@ class FundingBasisStrategy:
                 except Exception:
                     pass
 
-        # 3) ゲートウェイから拝借（属性名の揺れに対応）
-        gw = None
-        for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex"):
-            cand = getattr(self, name, None)
-            if cand is not None:
-                gw = cand
-                break
-        if gw is None:
-            oms = getattr(self, "_oms", None)
-            if oms is not None:
-                for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex", "_ex"):
-                    cand = getattr(oms, name, None)
-                    if cand is None and hasattr(oms, "_ex"):
-                        cand = getattr(oms, "_ex", None)
-                    if cand is not None:
-                        gw = cand
-                        break
-        if gw is None:
-            oms = getattr(self, "_oms", None)
-            if oms is not None:
-                for name in ("bitget_gateway", "bitget", "gateway", "exchange", "ex", "_ex"):
-                    cand = getattr(oms, name, None)
-                    if cand is None and hasattr(oms, "_ex"):
-                        cand = getattr(oms, "_ex", None)
-                    if cand is not None:
-                        gw = cand
-                        break
-        if gw is not None:
-            # 3a) メソッドがあれば最優先（同期想定。非同期の場合は下のキャッシュにフォールバック）
-            if hasattr(gw, "get_bbo"):
-                # get_bbo が async def の場合はここでは呼ばない（未await警告を避ける）
-                fn = gw.get_bbo
-                if not inspect.iscoroutinefunction(fn):
-                    try:
-                        b = fn(symbol)
-                        if isinstance(b, (list, tuple)) and len(b) >= 2:
-                            return float(b[0]), float(b[1])
-                        if isinstance(b, dict):
-                            return (
-                                _safe_float(b.get("bid")),
-                                _safe_float(b.get("ask")),
-                            )
-                    except Exception:
-                        pass
-            # 3b) 代表的な属性から推測（_bbo_cacheなど）
-            for attr in ("_bbo_cache", "_last_bbo", "bbo", "_bbo"):
-                store = getattr(gw, attr, None)
-                if isinstance(store, dict) and symbol in store:
-                    v = store[symbol]
-                    try:
-                        if isinstance(v, (list, tuple)) and len(v) >= 2:
-                            return float(v[0]), float(v[1])
-                        if isinstance(v, dict):
-                            return (
-                                _safe_float(v.get("bid")),
-                                _safe_float(v.get("ask")),
-                            )
-                    except Exception:
-                        pass
-            # 3c) orderbook から先頭気配を拾う（形式が合えば）
-            for ob_attr in ("orderbook", "_orderbook", "_books"):
-                ob = getattr(gw, ob_attr, None)
-                if isinstance(ob, dict) and symbol in ob:
-                    try:
-                        book = ob[symbol]
-                        bids = book.get("bids") or []
-                        asks = book.get("asks") or []
-                        bid_px = float(bids[0][0]) if bids and isinstance(bids[0], (list, tuple)) else None
-                        ask_px = float(asks[0][0]) if asks and isinstance(asks[0], (list, tuple)) else None
-                        if bid_px is not None or ask_px is not None:
-                            return bid_px, ask_px
-                    except Exception:
-                        pass
+        # 3) ゲートウェイのBBOキャッシュを直接読む（_gw_cache / _locate_gateway_with_scale から取得）
+        try:
+            gw_cache = getattr(self, "_gw_cache", {})
+            gw = gw_cache.get(symbol) if isinstance(gw_cache, dict) else None
+            if gw is None:
+                gw = self._locate_gateway_with_scale()
+            if gw is not None:
+                bbo = getattr(gw, "_bbo_cache", {}).get(symbol) or {}
+                bid = _safe_float(bbo.get("bid"))
+                ask = _safe_float(bbo.get("ask"))
+                if bid is not None or ask is not None:
+                    return bid, ask
+        except Exception:
+            pass
 
-        # 4) 見つからなければ (None, None)
+        # 4) ここまでで取れなければ最後に None を返す
         return None, None
 
     def _is_bbo_valid(self, bid: Optional[float], ask: Optional[float]) -> bool:
