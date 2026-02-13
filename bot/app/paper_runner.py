@@ -87,6 +87,8 @@ async def _run(config_path: str | None) -> None:
 
     # Paper Exchange（模擬約定）。OMS とは後で bind する。
     paper_ex = PaperExchange(data_source=data_ex, initial_usdt=100_000.0)
+    # BitgetGatewayがprimeで更新するマーケットキャッシュをPaper側と共有する（_scale_cache/_bbo_cache/_price_stateなど）
+    paper_ex.share_market_caches(data_ex)
 
     # OMS
     oms = OmsEngine(ex=paper_ex, repo=repo, cfg=None)
@@ -97,6 +99,11 @@ async def _run(config_path: str | None) -> None:
     oms._reject_window_ms = cfg.risk.reject_burst_window_s * 1000
     oms._symbol_cooldown_ms = cfg.risk.symbol_cooldown_s * 1000
     paper_ex.bind_oms(oms)
+    # 起動直後の constraints_missing を減らすため、対象シンボルの制約（minQty/minNotional/qtyStep）を温める
+    try:
+        await oms.warmup_order_constraints(cfg.strategy.symbols)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("oms.constraints.warmup failed: {}", e)
 
     # Risk（flatten_all は strategy から呼び出す）
     strategy_holder: dict[str, Any] = {}

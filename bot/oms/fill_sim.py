@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
 
+from bot.cost.model import CostModel
 from bot.exchanges.base import ExchangeGateway
 from bot.exchanges.types import Balance, FundingInfo, Order, OrderRequest, Position
 
@@ -27,7 +29,9 @@ class _PaperOrder:
 class PaperExchange(ExchangeGateway):
     """ベストBid/Askを使って疑似約定する ExchangeGateway（REST発注なし）"""
 
-    def __init__(self, *, data_source: ExchangeGateway, initial_usdt: float = 100_000.0) -> None:
+    def __init__(
+        self, *, data_source: ExchangeGateway, initial_usdt: float = 100_000.0, cost_model: CostModel | None = None
+    ) -> None:
         """これは何をする関数？
         → 市場データ/補助情報（Funding/ティッカー）を返す data_source と、初期USDT残高を受け取ります。
         """
@@ -35,6 +39,8 @@ class PaperExchange(ExchangeGateway):
         self._data = data_source  # BitgetGateway 等（REST/WSデータ専用、発注はしない）
         self._oms = None  # 後から bind_oms() でセット
         self._id_seq = 0
+        self._exec_seq = 0
+        self._cost_model = cost_model or CostModel()
 
         # BBO/トレードのスナップショット（perp主体。spotは無ければperpで代用）
         self._bbo: dict[str, tuple[float | None, float | None]] = {}  # symbol -> (bid, ask)
@@ -59,6 +65,73 @@ class PaperExchange(ExchangeGateway):
 
         # 排他制御
         self._lock = asyncio.Lock()
+
+    def _core_symbol(self, symbol: str) -> str:
+        """これは何をする関数？→ `_SPOT` 付きの場合にコアシンボルへ正規化します。"""
+
+        return symbol[:-5] if symbol.endswith("_SPOT") else symbol
+
+    def _bbo_with_fallback(self, symbol: str) -> tuple[float | None, float | None]:
+        """これは何をする関数？
+        → 指定シンボルのBBOを返します。`*_SPOT` のBBOが無い場合はコアシンボルのBBOで代用します。
+        """
+
+        bid, ask = self._bbo.get(symbol, (None, None))
+        if symbol.endswith("_SPOT") and (bid is None or ask is None):
+            core = self._core_symbol(symbol)
+            core_bid, core_ask = self._bbo.get(core, (None, None))
+            if bid is None:
+                bid = core_bid
+            if ask is None:
+                ask = core_ask
+        return bid, ask
+
+    def _last_price_with_fallback(self, symbol: str) -> float | None:
+        """これは何をする関数？→ `*_SPOT` のlastが無い場合にコアシンボルのlastを返します。"""
+
+        if symbol in self._last_price:
+            return self._last_price[symbol]
+        if symbol.endswith("_SPOT"):
+            core = self._core_symbol(symbol)
+            if core in self._last_price:
+                return self._last_price[core]
+        return None
+
+    def share_market_caches(self, source: Any) -> None:
+        """Paper用: 他ゲートウェイの市場キャッシュ(_scale_cache/_price_state/_bbo_cacheなど)を参照共有する。"""
+
+        try:
+            for name in ("_scale_cache", "_price_state", "_bbo_cache", "_last_spot_px", "_last_index_px"):
+                val = getattr(source, name, None)
+                if isinstance(val, dict):
+                    setattr(self, name, val)
+            # PaperExchangeがどのゲートウェイからどのキャッシュdictを共有したかをログに出して確認する
+            logger.info(
+                "paper.share_market_caches src_type={} src_gw_id={} "
+                "src_scale_id={} self_scale_id={} src_bbo_id={} self_bbo_id={} "
+                "src_price_state={} self_price_state={}",
+                type(source),
+                getattr(source, "gw_id", None),
+                hex(id(getattr(source, "_scale_cache", None)))
+                if getattr(source, "_scale_cache", None) is not None
+                else None,
+                hex(id(getattr(self, "_scale_cache", None)))
+                if getattr(self, "_scale_cache", None) is not None
+                else None,
+                hex(id(getattr(source, "_bbo_cache", None)))
+                if getattr(source, "_bbo_cache", None) is not None
+                else None,
+                hex(id(getattr(self, "_bbo_cache", None)))
+                if getattr(self, "_bbo_cache", None) is not None
+                else None,
+                getattr(source, "_price_state", None),
+                getattr(self, "_price_state", None),
+            )
+            # PaperExchangeとsrc_gateway(BitgetGatewayなど)のキャッシュdictとprice_stateが
+            # 本当に共有されているかを確認するためのデバッグログ
+        except Exception:
+            pass
+
 
     # ---------- 配線：OMSを後から結びつける ----------
 
@@ -108,15 +181,21 @@ class PaperExchange(ExchangeGateway):
         → 近似価格を返します。優先順位：mid(BBO) > last > data_sourceのticker。
         """
 
-        bid, ask = self._bbo.get(symbol, (None, None))
+        bid, ask = self._bbo_with_fallback(symbol)
         if bid is not None and ask is not None:
             return (bid + ask) / 2.0
-        if symbol in self._last_price:
-            return self._last_price[symbol]
+        last = self._last_price_with_fallback(symbol)
+        if last is not None:
+            return last
         # フォールバック：data_source（REST）
         try:
             return await self._data.get_ticker(symbol)
         except Exception:
+            if symbol.endswith("_SPOT"):
+                try:
+                    return await self._data.get_ticker(self._core_symbol(symbol))
+                except Exception:
+                    pass
             return 0.0
 
     async def get_funding_info(self, symbol: str) -> FundingInfo:
@@ -191,6 +270,8 @@ class PaperExchange(ExchangeGateway):
     async def cancel_order(self, symbol: str, order_id: str | None = None, client_order_id: str | None = None) -> None:
         """これは何をする関数？→ ローカル注文を取消し、OMSへ 'canceled' を通知します。"""
 
+        ts = getattr(self._data, "_now", None) or datetime.now(timezone.utc)
+
         async with self._lock:
             po = None
             cid = client_order_id
@@ -201,15 +282,25 @@ class PaperExchange(ExchangeGateway):
             if not po or po.status in {"filled", "canceled"}:
                 return
             po.status = "canceled"
+            self._exec_seq += 1
+            exec_id = f"{po.order_id}-CANCEL-{self._exec_seq}"
+            cum_filled_qty = float(po.filled_qty)
+            avg_fill_price = float(po.avg_price) if po.avg_price is not None else None
 
         if self._oms:
             await self._oms.on_execution_event(
                 {
                     "client_id": po.client_id,
+                    "order_id": po.order_id,
+                    "symbol": po.req.symbol,
+                    "side": po.req.side,
                     "status": "canceled",
+                    "exec_id": exec_id,
                     "last_filled_qty": 0.0,
-                    "cum_filled_qty": po.filled_qty,
-                    "avg_fill_price": po.avg_price,
+                    "cum_filled_qty": cum_filled_qty,
+                    "avg_fill_price": avg_fill_price,
+                    "fee": 0.0,
+                    "updated_at": ts,
                 }
             )
 
@@ -452,7 +543,7 @@ class PaperExchange(ExchangeGateway):
         → 指値が板内に入っているかを判定します（Buy: price>=ask / Sell: price<=bid）。
         """
 
-        bid, ask = self._bbo.get(req.symbol, (None, None))
+        bid, ask = self._bbo_with_fallback(req.symbol)
         if bid is None or ask is None or req.price is None:
             return False
         if req.side.lower() == "buy":
@@ -460,26 +551,18 @@ class PaperExchange(ExchangeGateway):
         return req.price <= bid
 
     async def _price_for_market(self, symbol: str, side: str) -> float:
-        """これは何をする関数？→ Market の約定価格（Buy→Ask / Sell→Bid / 無ければmid/last）。"""
+        """これは何をする関数？→ Market の約定価格（スリッページ/スプレッド補正込み）。"""
 
-        bid, ask = self._bbo.get(symbol, (None, None))
-        if side.lower() == "buy":
-            if ask is not None:
-                return ask
-        else:
-            if bid is not None:
-                return bid
-        if bid is not None and ask is not None:
-            return (bid + ask) / 2.0
-        return self._last_price.get(symbol, 0.0)
+        bid, ask = self._bbo_with_fallback(symbol)
+        fallback = self._last_price_with_fallback(symbol) or 0.0
+        return self._cost_model.market_fill_price(bid=bid, ask=ask, side=side, fallback=fallback)
 
     async def _price_for_limit_fill(self, symbol: str, side: str) -> float:
-        """これは何をする関数？→ Limit 成立時の約定価格（Buy→Ask / Sell→Bid）。"""
+        """これは何をする関数？→ Limit 成立時の約定価格（Bid/Askに補正を乗せる）。"""
 
-        bid, ask = self._bbo.get(symbol, (None, None))
-        if side.lower() == "buy":
-            return ask if ask is not None else self._last_price.get(symbol, 0.0)
-        return bid if bid is not None else self._last_price.get(symbol, 0.0)
+        bid, ask = self._bbo_with_fallback(symbol)
+        fallback = self._last_price_with_fallback(symbol) or 0.0
+        return self._cost_model.market_fill_price(bid=bid, ask=ask, side=side, fallback=fallback)
 
     async def _try_fill_limits(self, symbol: str) -> None:
         """これは何をする関数？
@@ -503,23 +586,44 @@ class PaperExchange(ExchangeGateway):
         → ローカル注文を指定数量・価格で即時に約定させ、ポジション/残高を更新し、OMSへイベント通知します。
         """
 
+        ts = getattr(self._data, "_now", None) or datetime.now(timezone.utc)
+
+        logger.info(
+            "paper.trade.recorded symbol={} side={} qty={} price={}",
+            po.req.symbol,
+            po.req.side,
+            float(fill_qty),
+            float(price),
+        )  # バックテスト中にPaperExchangeが実際に約定を記録したタイミングと内容をログに出す
+
         async with self._lock:
             po.filled_qty += float(fill_qty)
             po.avg_price = float(price) if po.avg_price is None else (po.avg_price + float(price)) / 2.0
             po.status = final_status
+            self._exec_seq += 1
+            exec_id = f"{po.order_id}-EXEC-{self._exec_seq}"
+            cum_filled_qty = float(po.filled_qty)
 
         # ポジション・残高へ反映
         await self._apply_fill_effects(symbol=po.req.symbol, side=po.req.side, qty=fill_qty, price=price)
 
         # OMS へ 約定イベントを通知
         if self._oms:
+            fee_quote = self._cost_model.taker_fee(symbol=po.req.symbol, qty=float(fill_qty), price=float(price))
             await self._oms.on_execution_event(
                 {
                     "client_id": po.client_id,
-                    "status": "filled",
+                    "order_id": po.order_id,
+                    "symbol": po.req.symbol,
+                    "side": po.req.side,
+                    "status": final_status,
+                    "exec_id": exec_id,
                     "last_filled_qty": float(fill_qty),
-                    "cum_filled_qty": float(po.filled_qty),
+                    "cum_filled_qty": cum_filled_qty,
                     "avg_fill_price": float(price),
+                    "fee": float(fee_quote),
+                    # Backtestの日次集計(run_one_day)は trade.ts の日付で trades を数えるため、紙約定の発生時刻（シミュレーション時刻）をexecutionイベントにも載せる
+                    "updated_at": ts,
                 }
             )
 

@@ -612,6 +612,10 @@ async def _main_async(
     # 発注先（dry-run は PaperExchange、live は共有BitgetGateway）
     if dry_run:
         trade_ex: ExchangeGateway = PaperExchange(data_source=data_ex, initial_usdt=100_000.0)
+        if isinstance(trade_ex, PaperExchange):
+            # primeが更新するBitgetGatewayのマーケットキャッシュをPaper側と共有する
+            # (_scale_cache/_bbo_cache/_price_stateなど)
+            trade_ex.share_market_caches(bitget_ex)
         oms = OmsEngine(ex=trade_ex, repo=repo, cfg=None)
         # --- 設定の適用：OMS（WSスタレブロック：STEP32） ---
         oms._ws_stale_block_ms = cfg.risk.ws_stale_block_ms
@@ -631,6 +635,12 @@ async def _main_async(
         oms._reject_window_ms = cfg.risk.reject_burst_window_s * 1000
         oms._symbol_cooldown_ms = cfg.risk.symbol_cooldown_s * 1000
         logger.info("live_runner trade_ex gw_id={}", id(trade_ex))
+
+    # 起動直後の constraints_missing を減らすため、対象シンボルの制約（minQty/minNotional/qtyStep）を温める
+    try:
+        await oms.warmup_order_constraints(cfg.strategy.symbols)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("oms.constraints.warmup failed: {}", e)
 
     # RiskManager（flatten_all の実体は strategy 経由にする）
     strategy_holder: dict[str, Any] = {}

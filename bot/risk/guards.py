@@ -213,6 +213,13 @@ class RiskManager:
         flatten_all を実行し、新規注文を停止する。
         すでに KILL 済みであれば何もしない。
         """
+        # バックテスト時だけキルスイッチを無効化するためのガード
+        if os.getenv("BACKTEST_DISABLE_KILL_SWITCH") == "1":
+            logger.info(
+                "kill_switch.disabled_for_backtest reason={}",
+                reason,
+            )  # BACKTEST_DISABLE_KILL_SWITCH=1のときはflatten_allや新規停止を行わずにスキップしたことを記録する
+            return
         if self._killed:
             return
         self._killed = True

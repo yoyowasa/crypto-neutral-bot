@@ -1,0 +1,18 @@
+# バックテスト設定例（必要に応じて編集してください）
+data_dir: tests/backtest         # Funding/OHLCV生CSVの置き場
+symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+ohlcv_pattern: "{symbol}_USDTFUTURES_4H_3y_ohlcv_bitget.csv"
+funding_pattern: "{symbol}_funding_3y_bitget.csv"
+prices_out: tests/backtest/prices_feed.csv
+funding_out: tests/backtest/funding_feed.csv
+# 合成BBOの総スプレッド[bps]（例: 10=0.10%）。銘柄別があればそちらが優先。
+spread_bps: 10.0
+# spread_bps_by_symbol: {BTCUSDT: 2.0, ETHUSDT: 4.0, SOLUSDT: 6.0}
+db_url: "sqlite+aiosqlite:///./tests/backtest/trading_backtest.db"  # 本番DBと分離したバックテスト用
+# run_date: "2024-10-01"           # 実行したいUTC日付（未指定なら生成のみ）
+step_sec: 3.0
+log_file: 
+# 複数日回したい場合は start_date / end_date を指定（run_date と併用しない）
+start_date: "2025-06-01"
+end_date: "2025-12-04"
+# log_dir: tests/backtest/logs

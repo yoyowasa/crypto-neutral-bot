@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +14,7 @@ from loguru import logger
 
 from bot.config.loader import load_config
 from bot.config.models import RiskConfig, StrategyFundingConfig
+from bot.cost.model import CostModel
 from bot.data.repo import Repo
 from bot.exchanges.base import ExchangeGateway
 from bot.exchanges.types import Balance, FundingInfo, Order, OrderRequest, Position
@@ -248,6 +251,13 @@ class BacktestResult:
     funding_events: int
     trades: int
     net_pnl: float
+    funding_pnl: float
+    trading_pnl: float
+    fees_est: float
+    slippage_est: float
+    entries: int
+    exits: int
+    avg_hold_seconds: float | None
 
 
 class BacktestRunner:
@@ -271,6 +281,20 @@ class BacktestRunner:
         self._schedule = funding_schedule
         self._step_sec = float(step_sec)
         self._repo = Repo(db_url=db_url)
+        # backtestでのコスト前提は env で上書き可能（感度分析用）
+        taker_fee_bps_roundtrip = float(
+            os.environ.get("STRATEGY__TAKER_FEE_BPS_ROUNDTRIP", str(strategy_cfg.taker_fee_bps_roundtrip)) or 0.0
+        )
+        estimated_slippage_bps = float(
+            os.environ.get("STRATEGY__ESTIMATED_SLIPPAGE_BPS", str(strategy_cfg.estimated_slippage_bps)) or 0.0
+        )
+        extra_spread_bps = float(os.environ.get("STRATEGY__EXTRA_SPREAD_BPS", "1.0") or 1.0)
+        self._cost_model = CostModel(
+            spot_taker_fee_bps=taker_fee_bps_roundtrip / 2.0,
+            perp_taker_fee_bps=taker_fee_bps_roundtrip / 2.0,
+            slippage_bps=estimated_slippage_bps,
+            extra_spread_bps=extra_spread_bps,
+        )
 
         # Strategy の対象シンボル
         self._symbols = list(strategy_cfg.symbols)
@@ -279,7 +303,7 @@ class BacktestRunner:
         self._data_src = ReplayDataSource(schedule=funding_schedule or FundingSchedule(path=self._empty_schedule_csv()))
 
         # 疑似約定の取引所
-        self._paper = PaperExchange(data_source=self._data_src, initial_usdt=100_000.0)
+        self._paper = PaperExchange(data_source=self._data_src, initial_usdt=100_000.0, cost_model=self._cost_model)
 
         # 取引部品
         self._oms = OmsEngine(ex=self._paper, repo=self._repo, cfg=None)
@@ -300,6 +324,10 @@ class BacktestRunner:
             hedge_delay_p95_threshold_sec=2.0,
             api_error_max_in_60s=10,
             flatten_all=_flatten_all,
+            # Funding/Basis は「ホールドして稼ぐ」が本質なので、バックテストでは sign flip によるKILLを原則無効化する。
+            # 必要なら env で上書きできるようにしておく（例：BACKTEST__FUNDING_FLIP_MIN_ABS=0.00005）。
+            funding_flip_min_abs=float(os.environ.get("BACKTEST__FUNDING_FLIP_MIN_ABS", "1.0") or 1.0),
+            funding_flip_consecutive=int(os.environ.get("BACKTEST__FUNDING_FLIP_CONSECUTIVE", "999999") or 999999),
         )
 
         # Strategy（実装の引数名に合わせて渡す）
@@ -308,6 +336,8 @@ class BacktestRunner:
             risk_config=risk_cfg,
             strategy_config=strategy_cfg,
             period_seconds=8.0 * 3600.0,
+            taker_fee_bps_roundtrip=taker_fee_bps_roundtrip,
+            estimated_slippage_bps=estimated_slippage_bps,
             risk_manager=self._risk,
         )
         self._strategy_holder["strategy"] = self._strategy
@@ -403,10 +433,25 @@ class BacktestRunner:
                     self._paper._scale_cache = {}
                 if not hasattr(self._paper, "_price_state"):
                     self._paper._price_state = {}
+                if not hasattr(self._paper, "_bbo_cache"):
+                    self._paper._bbo_cache = {}
                 sc = self._paper._scale_cache
                 ps = self._paper._price_state
-                sc[tick.symbol] = {"priceScale": 2}
+                bbo = self._paper._bbo_cache
+                # backtest用の最低限メタ（OMSのサイズガードに必要）
+                sc[tick.symbol] = {
+                    "priceScale": 2,
+                    # qtyの刻み/最小（実取引所とは異なるが、dust注文を抑止できる程度の値にする）
+                    "qtyStep_perp": 1e-6,
+                    "qtyStep_spot": 1e-6,
+                    "minQty_perp": 1e-6,
+                    "minQty_spot": 1e-6,
+                    # 最小名目（USDT想定）。5USDT未満は skip して現実のrejectに近づける
+                    "minNotional_perp": 5.0,
+                    "minNotional_spot": 5.0,
+                }
                 ps[tick.symbol] = "READY"
+                bbo[tick.symbol] = {"bid": tick.bid, "ask": tick.ask}
                 if tick.last is not None:
                     if not hasattr(self._paper, "_last_spot_px"):
                         self._paper._last_spot_px = {}
@@ -437,13 +482,88 @@ class BacktestRunner:
         tt = await self._repo.list_trades()
         funding_today = [f for f in ff if f.ts.date().isoformat() == date_utc]
         trades_today = [t for t in tt if t.ts.date().isoformat() == date_utc]
-        net = sum(f.realized_pnl for f in funding_today) - sum(t.fee for t in trades_today)
+        funding_pnl = sum(f.realized_pnl for f in funding_today)
+
+        def _calc_trade_metrics(trades: list) -> tuple[float, float, float, int, int, float | None]:
+            trades_sorted = sorted(trades, key=lambda x: x.ts)
+            realized = 0.0
+            fees = 0.0
+            slippage = 0.0
+            entries = 0
+            exits = 0
+            hold_durations: list[float] = []
+            pos: dict[str, dict[str, Any]] = defaultdict(lambda: {"size": 0.0, "avg": 0.0, "entry_ts": None})
+
+            for t in trades_sorted:
+                price = float(t.price)
+                qty = float(t.qty)
+                side = (t.side or "").lower()
+                signed_qty = qty if side == "buy" else -qty
+                notional = abs(qty * price)
+
+                fee_val = float(getattr(t, "fee", 0.0) or 0.0)
+                fees += fee_val if fee_val > 0.0 else self._cost_model.taker_fee(symbol=t.symbol, qty=qty, price=price)
+                slippage += self._cost_model.slippage_cost(notional=notional)
+
+                p = pos[t.symbol]
+                size = float(p["size"])
+                avg = float(p["avg"])
+                entry_ts = p["entry_ts"]
+
+                if size == 0 or size * signed_qty >= 0:
+                    new_size = size + signed_qty
+                    new_avg = (
+                        ((avg * abs(size)) + price * abs(signed_qty)) / abs(new_size) if new_size != 0 else price
+                    )
+                    if size == 0 and new_size != 0:
+                        entries += 1
+                        entry_ts = t.ts
+                    p["size"] = new_size
+                    p["avg"] = new_avg
+                    p["entry_ts"] = entry_ts
+                    continue
+
+                close_qty = min(abs(size), abs(signed_qty))
+                if size > 0:
+                    realized += (price - avg) * close_qty
+                else:
+                    realized += (avg - price) * close_qty
+
+                new_size = size + signed_qty
+                if abs(new_size) < 1e-12:
+                    exits += 1
+                    if entry_ts:
+                        hold_durations.append((t.ts - entry_ts).total_seconds())
+                    p["size"] = 0.0
+                    p["avg"] = 0.0
+                    p["entry_ts"] = None
+                else:
+                    p["size"] = new_size
+                    p["avg"] = price
+                    p["entry_ts"] = t.ts
+                    entries += 1
+
+            avg_hold = sum(hold_durations) / len(hold_durations) if hold_durations else None
+            return realized, fees, slippage, entries, exits, avg_hold
+
+        trading_pnl, fees_est, slippage_est, entries, exits, avg_hold = _calc_trade_metrics(trades_today)
+        # slippage_est は「どれくらい滑ったか/補正が乗ったか」の診断値。
+        # PaperExchange の約定価格はすでに slippage(+extra_spread) を織り込んでいるため、
+        # ここで net からさらに控除すると二重計上になる。
+        net = funding_pnl + trading_pnl - fees_est
 
         return BacktestResult(
             date=date_utc,
             funding_events=len(funding_today),
             trades=len(trades_today),
             net_pnl=float(net),
+            funding_pnl=float(funding_pnl),
+            trading_pnl=float(trading_pnl),
+            fees_est=float(fees_est),
+            slippage_est=float(slippage_est),
+            entries=entries,
+            exits=exits,
+            avg_hold_seconds=avg_hold,
         )
 
 
@@ -457,7 +577,8 @@ def main() -> None:
          poetry run python -m bot.backtest.replay \
            --prices data/prices.csv \
            --funding data/funding.csv \
-           --date 2025-01-01
+           --date 2025-01-01 \
+           --config config/app.yaml
     """
 
     parser = argparse.ArgumentParser(description="Backtest 1-day replay (paper fill from CSV/Parquet)")
@@ -465,10 +586,17 @@ def main() -> None:
     parser.add_argument("--funding", default=None, help="CSV with columns: ts,symbol,rate (period rate, signed)")
     parser.add_argument("--date", required=True, help="UTC date YYYY-MM-DD")
     parser.add_argument("--step-sec", type=float, default=3.0, help="strategy step interval seconds")
+    parser.add_argument(
+        "--config",
+        default="config/app.yaml",
+        help="設定ファイルパス（db_urlなどを取得）。未指定なら config/app.yaml",
+    )
+    parser.add_argument("--db-url", help="DB接続文字列。指定があればconfigより優先")
     args = parser.parse_args()
 
     async def _run() -> None:
-        cfg = load_config()
+        cfg = load_config(config_path=args.config)
+        db_url = args.db_url or cfg.db_url
         feed = CsvPriceFeed(path=args.prices)
         sched = FundingSchedule(path=args.funding) if args.funding else None
         runner = BacktestRunner(
@@ -476,16 +604,23 @@ def main() -> None:
             funding_schedule=sched,
             strategy_cfg=cfg.strategy,
             risk_cfg=cfg.risk,
-            db_url=cfg.db_url,
+            db_url=db_url,
             step_sec=args.step_sec,
         )
         res = await runner.run_one_day(date_utc=args.date)
         logger.info(
-            "Backtest done: date={} funding_events={} trades={} net_pnl={}",
+            "Backtest done: date={} funding_events={} trades={} net_pnl={} funding_pnl={} trading_pnl={} fees_est={} slippage_est={} entries={} exits={} avg_hold_s={}",
             res.date,
             res.funding_events,
             res.trades,
             round(res.net_pnl, 4),
+            round(res.funding_pnl, 4),
+            round(res.trading_pnl, 4),
+            round(res.fees_est, 4),
+            round(res.slippage_est, 4),
+            res.entries,
+            res.exits,
+            None if res.avg_hold_seconds is None else round(res.avg_hold_seconds, 2),
         )
 
     try:

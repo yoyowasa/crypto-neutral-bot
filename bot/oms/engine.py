@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio  # ドレイン中に小さく待つためのスリープで使う
 import logging  # 構造化ログ（運用監査）用にloggerを使う
+import math  # 数量のステップ丸め（安全側の切り下げ）に使う
 import os
 import random
 import time
+from collections import deque
 from decimal import Decimal  # 価格のズレをbpsで計算するために使用
 from typing import (
     Any,
@@ -116,6 +118,12 @@ class OmsEngine:
         self._trades_jsonl: str = "logs/trades.jsonl"
         self._round_trips_jsonl: str = "logs/round_trips.jsonl"
         self._trip_agg: RoundTripAggregator = RoundTripAggregator(self._round_trips_jsonl)
+        # 制約取得不全などの危険状態に入ったら新規発注を止める（CLOSE系は許容して退避を試みる）
+        self._safe_mode: bool = False
+        self._safe_mode_reason: str = ""
+        # 制約（minQty/minNotional/qtyStep）の取得を連打しないためのバックオフ（シンボル単位）
+        self._constraints_prime_backoff_ms: int = 30_000
+        self._constraints_prime_next_ms: dict[str, int] = {}
         # ===== メトリクス（集計用） =====
         self._metrics_chase_amend_total: dict[str, int] = {}
         self._metrics_cooldown_enter_total: dict[str, int] = {}
@@ -141,6 +149,10 @@ class OmsEngine:
             {}
         )  # 注文ごとの最終更新時刻（ms）を覚えて、古いWSイベントを無視するためのメモ
         self._inflight_client_ids: set[str] = set()  # 送信済みのclient注文IDを記録して二重発注を防ぐメモ帳
+        # execution 冪等性メモ（WSで同一約定が二重に飛ぶケースの対策）
+        self._processed_exec_ids: set[str] = set()
+        self._processed_exec_ids_fifo: deque[str] = deque()
+        self._processed_exec_ids_max: int = 50_000
 
     # ---------- 内部: client_id 生成 ----------
 
@@ -153,6 +165,123 @@ class OmsEngine:
         nonce = random.randint(1000, 9999)
         return f"{prefix}-{ms}-{nonce}"
 
+    def _enter_safe_mode(self, reason: str) -> None:
+        """これは何をする関数？
+        → 危険状態に入ったため、新規発注を止めるためのフラグを立てます（CLOSE系は可能なら継続）。
+        """
+
+        if self._safe_mode:
+            return
+        self._safe_mode = True
+        self._safe_mode_reason = str(reason or "")
+        logging.getLogger(__name__).error("oms.safe_mode.enter reason=%s", self._safe_mode_reason)
+
+    async def _prime_scale_cache_if_possible(self, symbol: str, *, force: bool = False) -> bool:
+        """これは何をする関数？
+        → 取引所メタ（minQty/minNotional/qtyStep など）が未取得なら、取得できる範囲で温めます。
+        """
+
+        core = symbol.replace("_SPOT", "")
+        now_ms = int(utc_now().timestamp() * 1000)
+        next_ms = self._constraints_prime_next_ms.get(core)
+        if (not force) and next_ms and now_ms < next_ms:
+            return False
+        # 候補: 直接のゲートウェイ / PaperExchange の下にある data_source
+        candidates: list[Any] = [self._ex]
+        data_ex = getattr(self._ex, "_data", None)
+        if data_ex is not None:
+            candidates.append(data_ex)
+
+        ok = False
+        for ex in candidates:
+            prime = getattr(ex, "_prime_scale_from_markets", None)
+            if not callable(prime):
+                continue
+            try:
+                res = prime(core)
+                if asyncio.iscoroutine(res):
+                    await res
+                ok = True
+            except Exception:
+                continue
+        if not ok:
+            # 取得に失敗した場合は、短時間の連打を避ける（ただし CLOSE系は force=True で上書き可能）
+            self._constraints_prime_next_ms[core] = now_ms + self._constraints_prime_backoff_ms
+        else:
+            # 成功したらバックオフを解除
+            self._constraints_prime_next_ms.pop(core, None)
+        return ok
+
+    async def warmup_order_constraints(self, symbols: list[str]) -> None:
+        """これは何をする関数？
+        → 起動時に対象シンボルの制約（minQty/minNotional/qtyStep）を温め、constraints_missing を減らします。
+        """
+
+        cores = sorted({str(s).replace("_SPOT", "") for s in (symbols or []) if s})
+        if not cores:
+            return
+        logger.info("oms.constraints.warmup.start cores={}", cores)
+        for core in cores:
+            await self._prime_scale_cache_if_possible(core, force=True)
+        logger.info("oms.constraints.warmup.done cores={}", cores)
+
+    async def _get_order_constraints(self, symbol: str) -> dict[str, float] | None:
+        """これは何をする関数？
+        → 発注サイズの正規化/最小判定に必要な制約（minQty/minNotional/qtyStep）を返します。
+        - *_SPOT は spot 側の制約を優先します
+        - キャッシュが空なら、可能な範囲で prime を試みます
+        """
+
+        core = symbol.replace("_SPOT", "")
+        is_spot = symbol.endswith("_SPOT")
+
+        def _lookup(ex: Any) -> dict[str, float] | None:
+            cache = getattr(ex, "_scale_cache", None)
+            if not isinstance(cache, dict):
+                return None
+            info = cache.get(core) or cache.get(symbol)
+            if not isinstance(info, dict):
+                return None
+            out: dict[str, float] = {}
+            try:
+                if is_spot:
+                    out["min_qty"] = float(info.get("minQty_spot") or 0.0)
+                    out["qty_step"] = float(info.get("qtyStep_spot") or 0.0)
+                    out["min_notional"] = float(info.get("minNotional_spot") or 0.0)
+                else:
+                    out["min_qty"] = float(info.get("minQty_perp") or 0.0)
+                    out["qty_step"] = float(info.get("qtyStep_perp") or 0.0)
+                    out["min_notional"] = float(info.get("minNotional_perp") or 0.0)
+                # qty_step が無い場合は min_qty をステップとして使う（最小刻みが minQty と一致する取引所が多い）
+                if out.get("qty_step", 0.0) <= 0.0 and out.get("min_qty", 0.0) > 0.0:
+                    out["qty_step"] = float(out["min_qty"])
+            except Exception:
+                return None
+            return out
+
+        info = _lookup(self._ex)
+        if info is None:
+            data_ex = getattr(self._ex, "_data", None)
+            if data_ex is not None:
+                info = _lookup(data_ex)
+
+        if info is None:
+            await self._prime_scale_cache_if_possible(symbol, force=False)
+            info = _lookup(self._ex)
+            if info is None:
+                data_ex = getattr(self._ex, "_data", None)
+                if data_ex is not None:
+                    info = _lookup(data_ex)
+
+        if not info:
+            return None
+
+        # どれも取れない場合は「制約不明」として None（fail-closed でブロック）
+        if float(info.get("min_qty", 0.0)) <= 0.0 and float(info.get("min_notional", 0.0)) <= 0.0:
+            return None
+
+        return info
+
     def touch_private_ws(self, ts: object | None = None) -> None:
         """Private WSを受け取った合図。取引所形式のtsでも、そのままNoneでもOK。内部でUTC msに正規化して保存する。"""
         try:
@@ -164,7 +293,7 @@ class OmsEngine:
 
     # ---------- 発注/取消API ----------
 
-    async def submit(self, req: OrderRequest) -> Optional[Order]:
+    async def submit(self, req: OrderRequest, *, meta: dict[str, Any] | None = None) -> Optional[Order]:
         """これは何をする関数？
         → 注文を取引所へ発注し、OMSの追跡に登録します（idempotencyのためclient_id必須）。
         """
@@ -182,6 +311,37 @@ class OmsEngine:
 
         coid = req.client_order_id or self._gen_client_id("bot")
         req.client_order_id = coid
+        meta_payload: dict[str, Any] = dict(meta or {})
+        # meta 未指定でも最低限の intent を推定してログへ残す（open/close の切り分け用）
+        meta_payload.setdefault("intent", "close" if getattr(req, "reduce_only", False) else "open")
+        meta_payload.setdefault("source", "strategy")
+        intent = str(meta_payload.get("intent") or "")
+        is_close_like = intent in {"close", "unwind", "flatten"} or bool(getattr(req, "reduce_only", False))
+        # SAFEモード中は新規建て/リバランスをブロック（CLOSE系は許容して退避を試みる）
+        if self._safe_mode and not is_close_like:
+            try:
+                rec = {
+                    "event": "order_skip",
+                    "ts": utc_now().isoformat(),
+                    "symbol": req.symbol,
+                    "side": req.side,
+                    "type": req.type,
+                    "qty": float(req.qty or 0.0),
+                    "price": req.price,
+                    "status": "skipped",
+                    "client_id": coid,
+                    "reason": "safe_mode",
+                    "safe_mode_reason": self._safe_mode_reason,
+                }
+                for k, v in meta_payload.items():
+                    if v is None or k in rec:
+                        continue
+                    rec[k] = v
+                append_jsonl_daily("logs", "orders", rec)
+            except Exception:
+                pass
+            logger.warning("order.skip: safe_mode sym={} intent={} cid={}", req.symbol, intent, coid)
+            return None
         if coid in self._inflight_client_ids:
             raise RiskBreach(f"duplicate client_order_id (idempotent submit): {coid}")  # 同じIDでの二重発注をブロック
         # Private WS ライブネス・ガード：直近の受信が古すぎれば新規発注はブロック
@@ -196,17 +356,19 @@ class OmsEngine:
             )
         # シンボル別クールダウン（REJECTEDの連発があった直後は新規発注を停止）
         cool_until = self._symbol_cooldown_until.get(req.symbol)
-        if cool_until and now_ms < cool_until:
+        # CLOSE系は「閉じられない」のが危険なので、クールダウン中でも通す（新規建て/増し玉だけ止める）
+        if cool_until and now_ms < cool_until and (not is_close_like):
             remaining = cool_until - now_ms
             raise RiskBreach(f"symbol cooldown active for {req.symbol}: {remaining}ms remaining")
         elif cool_until and now_ms >= cool_until:
             # 期限満了でブロック解除される瞬間に 'cooldown.exit' を記録（解除処理の直前）
             self._log_cooldown_exit(req.symbol, "timeout")
             self._symbol_cooldown_until.pop(req.symbol, None)
-        self._inflight_client_ids.add(coid)  # 今回送るIDをメモして二重送信を防止
-
-        if not req.client_id:
-            req.client_id = self._gen_client_id("ord")
+        # client_id も client_order_id(coid) と同じ値にしておくことで、
+        # 約定イベント側が client_id / clientOrderId / orderLinkId のどれで返してきても、
+        # OMS のキー(self._orders)と一致させて追跡できるようにする
+        # OMSの追跡キー(client_id)を、取引所が返す clientOrderId/orderLinkId と同じ値(coid)に揃える（照合ズレ防止）
+        req.client_id = coid
 
         logger.info(
             "OMS submit: symbol={} side={} type={} qty={} price={} cid={}",
@@ -223,18 +385,220 @@ class OmsEngine:
             logging.getLogger(__name__).info("order.skip: auth=false reason=%s", getattr(self, "auth_message", ""))
             return None
 
-        created = await self._ex.place_order(req)
+        # --- サイズガード（取引所制約の正規化/最小判定） ---
+        # Funding/Basis は薄利なので、極小qty（dust）や最小名目未満の注文は構造上「出さない」(fail-closed)
+        orig_qty = float(req.qty or 0.0)
+        constraints = await self._get_order_constraints(req.symbol)
+        # CLOSE/UNWIND は「閉じられない」のが危険なので、制約不明なら即時に温め直して再試行する
+        if constraints is None and is_close_like:
+            for attempt in range(3):
+                await self._prime_scale_cache_if_possible(req.symbol, force=True)
+                constraints = await self._get_order_constraints(req.symbol)
+                if constraints is not None:
+                    break
+                # 取りに行けない状態が続くなら、少しだけ間隔を空ける（毎tickで連打しない）
+                await asyncio.sleep(0.2 * float(attempt + 1))
+        if constraints is None:
+            if is_close_like:
+                self._enter_safe_mode(f"constraints_missing_close sym={req.symbol}")
+            try:
+                rec = {
+                    "event": "order_skip",
+                    "ts": utc_now().isoformat(),
+                    "symbol": req.symbol,
+                    "side": req.side,
+                    "type": req.type,
+                    "qty": orig_qty,
+                    "price": req.price,
+                    "status": "skipped",
+                    "client_id": req.client_id,
+                    "reason": "constraints_missing_close" if is_close_like else "constraints_missing",
+                }
+                for k, v in meta_payload.items():
+                    if v is None or k in rec:
+                        continue
+                    rec[k] = v
+                append_jsonl_daily(
+                    "logs",
+                    "orders",
+                    rec,
+                )
+            except Exception:
+                pass
+            logger.warning("order.skip: constraints_missing sym={} qty={} cid={}", req.symbol, orig_qty, req.client_id)
+            return None
 
+        min_qty = float(constraints.get("min_qty") or 0.0)
+        qty_step = float(constraints.get("qty_step") or 0.0)
+        min_notional = float(constraints.get("min_notional") or 0.0)
+
+        norm_qty = orig_qty
+        if qty_step > 0.0:
+            norm_qty = math.floor(float(orig_qty) / float(qty_step)) * float(qty_step)
+            norm_qty = round(float(norm_qty), 8)
+
+        if norm_qty <= 0.0:
+            try:
+                rec = {
+                    "event": "order_skip",
+                    "ts": utc_now().isoformat(),
+                    "symbol": req.symbol,
+                    "side": req.side,
+                    "type": req.type,
+                    "qty": orig_qty,
+                    "normalized_qty": norm_qty,
+                    "status": "skipped",
+                    "client_id": req.client_id,
+                    "reason": "qty_non_positive_after_norm",
+                    "min_qty": min_qty,
+                    "qty_step": qty_step,
+                    "min_notional": min_notional,
+                }
+                for k, v in meta_payload.items():
+                    if v is None or k in rec:
+                        continue
+                    rec[k] = v
+                append_jsonl_daily(
+                    "logs",
+                    "orders",
+                    rec,
+                )
+            except Exception:
+                pass
+            logger.warning(
+                "order.skip: qty_non_positive_after_norm sym={} qty={} step={} cid={}",
+                req.symbol,
+                orig_qty,
+                qty_step,
+                req.client_id,
+            )
+            return None
+
+        if min_qty > 0.0 and norm_qty < min_qty:
+            try:
+                rec = {
+                    "event": "order_skip",
+                    "ts": utc_now().isoformat(),
+                    "symbol": req.symbol,
+                    "side": req.side,
+                    "type": req.type,
+                    "qty": orig_qty,
+                    "normalized_qty": norm_qty,
+                    "status": "skipped",
+                    "client_id": req.client_id,
+                    "reason": "qty_below_min",
+                    "min_qty": min_qty,
+                    "qty_step": qty_step,
+                    "min_notional": min_notional,
+                }
+                for k, v in meta_payload.items():
+                    if v is None or k in rec:
+                        continue
+                    rec[k] = v
+                append_jsonl_daily(
+                    "logs",
+                    "orders",
+                    rec,
+                )
+            except Exception:
+                pass
+            logger.warning(
+                "order.skip: qty_below_min sym={} qty={} norm={} min_qty={} cid={}",
+                req.symbol,
+                orig_qty,
+                norm_qty,
+                min_qty,
+                req.client_id,
+            )
+            return None
+
+        approx_px = 0.0
+        if min_notional > 0.0:
+            try:
+                if req.price is not None and (req.type or "").lower().startswith("limit"):
+                    approx_px = float(req.price)
+                else:
+                    approx_px = float(await self._ex.get_ticker(req.symbol) or 0.0)
+            except Exception:
+                approx_px = 0.0
+            notional = float(norm_qty) * float(approx_px)
+            # min_notional は境界付近で弾かれやすいので、5%だけ安全側にバッファを取る
+            if approx_px <= 0.0 or notional < (min_notional * 1.05):
+                try:
+                    rec = {
+                        "event": "order_skip",
+                        "ts": utc_now().isoformat(),
+                        "symbol": req.symbol,
+                        "side": req.side,
+                        "type": req.type,
+                        "qty": orig_qty,
+                        "normalized_qty": norm_qty,
+                        "price": req.price,
+                        "approx_px": approx_px,
+                        "notional": notional,
+                        "status": "skipped",
+                        "client_id": req.client_id,
+                        "reason": "notional_below_min",
+                        "min_qty": min_qty,
+                        "qty_step": qty_step,
+                        "min_notional": min_notional,
+                    }
+                    for k, v in meta_payload.items():
+                        if v is None or k in rec:
+                            continue
+                        rec[k] = v
+                    append_jsonl_daily(
+                        "logs",
+                        "orders",
+                        rec,
+                    )
+                except Exception:
+                    pass
+                logger.warning(
+                    "order.skip: notional_below_min sym={} qty={} norm={} px={} notional={} min_notional={} cid={}",
+                    req.symbol,
+                    orig_qty,
+                    norm_qty,
+                    approx_px,
+                    round(notional, 8),
+                    min_notional,
+                    req.client_id,
+                )
+                return None
+
+        # 正規化結果を req へ反映（取引所ルールに寄せる）
+        if norm_qty != orig_qty:
+            req.qty = norm_qty
+
+        # ここから先で「送信済み」として扱う（idempotency）
+        self._inflight_client_ids.add(coid)  # 今回送るIDをメモして二重送信を防止
+
+        # place_order() 内で execution イベントが先に来ても拾えるよう、送信前にManagedOrderを登録しておく
         managed = ManagedOrder(
             req=req,
             state=OrderLifecycleState.SENT,
             sent_at=utc_now(),
-            order_id=created.order_id,
-            filled_qty=created.filled_qty,
-            avg_price=created.avg_fill_price,
+            order_id="",
+            filled_qty=0.0,
+            avg_price=0.0,
             retries=0,
         )
         self._orders[req.client_id] = managed
+
+        try:
+            created = await self._ex.place_order(req)
+        except Exception:
+            # 発注失敗時は追跡登録を戻す（unknown client_id連発や再発注不能を防ぐ）
+            self._orders.pop(req.client_id, None)
+            self._inflight_client_ids.discard(coid)
+            raise
+
+        # 返却値で不足情報だけ反映（execution側で先に更新されていても上書きで壊さない）
+        managed.order_id = getattr(created, "order_id", "") or managed.order_id
+        managed.filled_qty = max(managed.filled_qty, float(getattr(created, "filled_qty", 0.0) or 0.0))
+        created_avg = float(getattr(created, "avg_fill_price", 0.0) or 0.0)
+        if created_avg > 0.0:
+            managed.avg_price = created_avg
 
         if self._repo is not None:
             await self._repo.add_order_log(
@@ -248,21 +612,26 @@ class OmsEngine:
                 client_id=req.client_id,
             )
         try:
+            rec = {
+                "event": "order_new",
+                "ts": utc_now().isoformat(),
+                "symbol": req.symbol,
+                "side": req.side,
+                "type": req.type,
+                "qty": req.qty,
+                "price": req.price,
+                "status": "new",
+                "exchange_order_id": created.order_id,
+                "client_id": req.client_id,
+            }
+            for k, v in meta_payload.items():
+                if v is None or k in rec:
+                    continue
+                rec[k] = v
             append_jsonl_daily(
                 "logs",
                 "orders",
-                {
-                    "event": "order_new",
-                    "ts": utc_now().isoformat(),
-                    "symbol": req.symbol,
-                    "side": req.side,
-                    "type": req.type,
-                    "qty": req.qty,
-                    "price": req.price,
-                    "status": "new",
-                    "exchange_order_id": created.order_id,
-                    "client_id": req.client_id,
-                },
+                rec,
             )
         except Exception:
             pass
@@ -331,14 +700,16 @@ class OmsEngine:
         except Exception:
             pass
 
-    async def submit_hedge(self, symbol: str, delta_to_neutral: float) -> None:
+    async def submit_hedge(
+        self, symbol: str, delta_to_neutral: float, *, meta: dict[str, Any] | None = None
+    ) -> Optional[Order]:
         """これは何をする関数？
         → ネットデルタをゼロに近づける成行IOCを出します。
         """
 
         if delta_to_neutral == 0:
             logger.info("OMS hedge: delta already neutral")
-            return
+            return None
 
         side = "buy" if delta_to_neutral > 0 else "sell"
         qty = abs(delta_to_neutral)
@@ -352,7 +723,10 @@ class OmsEngine:
             post_only=False,
             client_id=self._gen_client_id("hedge"),
         )
-        await self.submit(req)
+        meta_payload: dict[str, Any] = dict(meta or {})
+        meta_payload.setdefault("intent", "rebalance")
+        meta_payload.setdefault("source", "strategy")
+        return await self.submit(req, meta=meta_payload)
 
     async def amend(
         self,
@@ -414,15 +788,67 @@ class OmsEngine:
                 return  # すでにより新しい状態を処理済み。古いイベントは静かに無視する
 
         cid = event.get("client_id") or event.get("clientOrderId") or event.get("orderLinkId") or event.get("clientId")
+        # executionイベントがOMSまで届いているか・どのキーが来ているか・repoが設定されているかを確認する（切り分け用ログ）
+        logger.info("OMS on_execution_event: recv cid={} keys={} repo_set={}", cid, sorted(event.keys()), self._repo is not None)
         if not cid or cid not in self._orders:
             logger.debug("OMS on_execution_event: unknown client_id, event={}", event)
             return
 
+        exec_id = (
+            event.get("exec_id")
+            or event.get("execId")
+            or event.get("execution_id")
+            or event.get("executionId")
+            or None
+        )
+        if exec_id:
+            exec_id_str = str(exec_id)
+            # 既処理の約定は捨てる（冪等性）
+            if exec_id_str in self._processed_exec_ids:
+                self._log.debug("oms.exec.skip_duplicate exec_id=%s cid=%s", exec_id_str, cid)
+                return
+            if len(self._processed_exec_ids_fifo) >= self._processed_exec_ids_max:
+                old = self._processed_exec_ids_fifo.popleft()
+                self._processed_exec_ids.discard(old)
+            self._processed_exec_ids.add(exec_id_str)
+            self._processed_exec_ids_fifo.append(exec_id_str)
+
         managed = self._orders[cid]
 
-        last_filled = float(event.get("last_filled_qty") or event.get("lastFillQty") or 0.0)
-        cum_filled = float(event.get("cum_filled_qty") or event.get("cumExecQty") or (managed.filled_qty + last_filled))
-        managed.filled_qty = max(managed.filled_qty, cum_filled)
+        prev_filled_qty = float(managed.filled_qty)  # 直前までの累積約定数量（増分計算に使う）
+
+        # last_filled は取引所/シミュレータでキー名が違うことがあるため、複数キーから拾う
+        last_filled = float(
+            event.get("last_filled_qty")
+            or event.get("last_fill_qty")
+            or event.get("lastFillQty")
+            or event.get("fillSz")
+            or event.get("fillQty")
+            or event.get("fill_qty")
+            or event.get("last_exec_qty")
+            or event.get("lastQty")
+            or 0.0
+        )
+
+        # cum_filled も同様に複数キー対応。無ければ prev + last で推定する
+        cum_filled = float(
+            event.get("cum_filled_qty")
+            or event.get("cum_fill_qty")
+            or event.get("cumExecQty")
+            or event.get("accFillSz")
+            or event.get("cumFillQty")
+            or event.get("filled_qty")
+            or event.get("filledQty")
+            or (prev_filled_qty + last_filled)
+        )
+
+        # 累積は減らさない（重複イベントが来ても安全）
+        managed.filled_qty = max(prev_filled_qty, cum_filled)
+
+        # last_filled が取れないイベントでも、cum の増分を last_filled として扱い trade_log を落とさない
+        filled_delta = max(0.0, managed.filled_qty - prev_filled_qty)
+        if last_filled <= 0.0 and filled_delta > 0.0:
+            last_filled = filled_delta
 
         price_val = event.get("avg_fill_price") or event.get("last_fill_price") or event.get("fillPrice")
         if price_val is not None:
@@ -440,20 +866,70 @@ class OmsEngine:
         elif raw_status == "rejected":
             managed.state = OrderLifecycleState.REJECTED
 
+        # add_trade に進めない原因が「last_filled が 0」なのかを確実に確認するための切り分けログ
+        logger.info(
+            "OMS on_execution_event: pre_add_trade_check cid={} last_filled={} cum_filled={} managed_filled={} raw_last={} raw_cum={} status={}",
+            cid,
+            last_filled,
+            cum_filled,
+            managed.filled_qty,
+            event.get("last_filled_qty"),
+            event.get("cum_filled_qty"),
+            event.get("status"),
+        )
         if last_filled > 0:
+            ts_raw = event.get("updated_at") if isinstance(event, dict) else getattr(event, "updated_at", None)
+            ts_dt = parse_exchange_ts(ts_raw) if ts_raw not in (None, "") else utc_now()
             if self._repo is not None:
+                self._log.info(
+                    "oms.on_execution_event.before_add_trade order_id=%s trade_sym=%s side=%s qty=%s price=%s repo_obj_id=%s repo_type=%s",
+                    event.get("order_id") if isinstance(event, dict) else getattr(event, "order_id", None),
+                    managed.req.symbol,
+                    managed.req.side,
+                    last_filled,
+                    float(price_val) if price_val is not None else 0.0,
+                    hex(id(self._repo)),
+                    type(self._repo),
+                )  # 約定イベントをどのRepoインスタンスに渡そうとしているかを記録するデバッグログ
+                # add_trade が実際に呼ばれているか（呼び出し前）を確認するログ
+                logger.info(
+                    "oms.on_execution_event: add_trade.call cid={} sym={} side={} last_filled={} cum_filled={} price_val={} avg_fill_price={} status={}",
+                    cid,
+                    managed.req.symbol,
+                    managed.req.side,
+                    last_filled,
+                    cum_filled,
+                    float(price_val) if price_val is not None else 0.0,
+                    float(event.get("avg_fill_price") or 0.0),
+                    event.get("status"),
+                )
+                fee_val = event.get("fee") or event.get("fee_quote") or event.get("fee_usdt") or event.get("feeUsd")
+                fee = float(fee_val) if fee_val not in (None, "") else 0.0
                 await self._repo.add_trade(
+                    ts=ts_dt,
                     symbol=managed.req.symbol,
                     side=managed.req.side,
                     qty=last_filled,
                     price=float(price_val) if price_val is not None else 0.0,
-                    fee=0.0,
+                    fee=fee,
                     exchange_order_id=managed.order_id or "",
                     client_id=cid,
                 )
+
+                # add_trade が実際に呼ばれているか（呼び出し後）を確認するログ
+                logger.info(
+                    "oms.on_execution_event: add_trade.done cid={} managed_filled_qty={} managed_state={}",
+                    cid,
+                    managed.filled_qty,
+                    managed.state,
+                )
+                self._log.info(
+                    "oms.on_execution_event.after_add_trade order_id=%s trade_sym=%s repo_obj_id=%s",
+                    event.get("order_id") if isinstance(event, dict) else getattr(event, "order_id", None),
+                    managed.req.symbol,
+                    hex(id(self._repo)),
+                )  # Repo.add_trade呼び出し後に、このRepoインスタンスにトレードが追加されたと想定していることを記録するデバッグログ
             try:
-                ts_raw = event.get("updated_at") if isinstance(event, dict) else getattr(event, "updated_at", None)
-                ts_dt = parse_exchange_ts(ts_raw) if ts_raw not in (None, "") else utc_now()
                 ts_iso = ts_dt.astimezone().isoformat()
 
                 # enrich fields

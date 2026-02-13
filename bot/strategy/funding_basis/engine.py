@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio  # close/flatten の二重送信を防ぐ排他制御で使用
 import datetime
 import inspect  # FundingBasisStrategyがどこから呼ばれているか(呼び出し元スタック)を調べるために使う標準ライブラリ
 import math  # 何をする？→ 共通刻みによる“切り下げ丸め”で使用
+import os  # バックテスト時に負のFunding制限を環境変数で無効化するために使う
 import types  # primary_gatewayがSimpleNamespaceでラップされている場合に中の本物のBitgetGatewayを取り出すために使う
+import uuid  # サイクルID（open→closeの相関）生成に使う
 from dataclasses import dataclass, field
 from typing import Any, Optional, Tuple
 
@@ -157,6 +160,12 @@ class FundingBasisStrategy:
         self._estimated_slippage_bps = estimated_slippage_bps or strategy_config.estimated_slippage_bps
         self._min_hold_periods = getattr(strategy_config, "min_hold_periods", 1.0)
         self._holdings = _Holdings()
+        # flatten_all と通常CLOSEが同時に走ると同一シンボルで決済注文が二重に出るので、ここで排他する
+        self._close_guard_lock = asyncio.Lock()
+        self._closing_symbols: set[str] = set()
+        # open→close の一連（2レッグ）を相関させるためのサイクルID
+        self._cycle_id_by_symbol: dict[str, str] = {}
+        self._log = logger
         self._risk_manager = risk_manager or RiskManager(
             loss_cut_daily_jpy=risk_config.loss_cut_daily_jpy,
             flatten_all=self.flatten_all,
@@ -208,6 +217,7 @@ class FundingBasisStrategy:
     ) -> Decision:
         """マーケット情報を受け取り評価→実行をまとめて行う。"""
 
+        self._log.info("strategy.step.enter sym={}", funding.symbol)
         decision = self.evaluate(funding=funding, spot_price=spot_price, perp_price=perp_price)
         await self.execute(decision, spot_price=spot_price, perp_price=perp_price)
         return decision
@@ -323,7 +333,7 @@ class FundingBasisStrategy:
                 time_to_event_min=time_to_event_min,
             )
 
-        if self._risk_manager.disable_new_orders:
+        if self._risk_manager.disable_new_orders and os.getenv("BACKTEST_DISABLE_RISK_GUARD") != "1":  # BACKTEST_DISABLE_RISK_GUARD=1でないときだけリスク管理を理由に新規建てをスキップする
             return self._log_decision(
                 Decision(action=DecisionAction.SKIP, symbol=symbol, reason="リスク管理で新規停止", predicted_apr=apr),
                 symbol=symbol,
@@ -347,7 +357,7 @@ class FundingBasisStrategy:
                 time_to_event_min=time_to_event_min,
             )
 
-        if predicted_rate <= 0:
+        if predicted_rate <= 0 and os.getenv("BACKTEST_ALLOW_NEGATIVE_FUNDING") != "1":  # BACKTEST_ALLOW_NEGATIVE_FUNDING=1でないときだけ負のFundingを理由に新規建てをスキップする
             return self._log_decision(
                 Decision(
                     action=DecisionAction.SKIP,
@@ -448,6 +458,18 @@ class FundingBasisStrategy:
     ) -> Decision:
         """evaluate の判定内容をデバッグ出力する。"""
         try:
+            logger.info(
+                "eval decision sym={} act={} reason={} prate={} apr={} cand={} gain={} cost={} tmin={}",
+                symbol,
+                decision.action.value,
+                getattr(decision, "reason", None),
+                predicted_rate,
+                apr,
+                candidate,
+                expected_gain,
+                expected_cost,
+                time_to_event_min,
+            )
             logger.debug(
                 "decide sym={} act={} reason={} prate={} apr={} cand={} gain={} cost={} tmin={}",
                 symbol,
@@ -468,6 +490,11 @@ class FundingBasisStrategy:
         """Evaluateで得たアクションを実際の発注へ変換する。"""
 
         if decision.action is DecisionAction.SKIP:
+            self._log.info(
+                "strategy.step.skip_before_market_data reason=decision_skip sym={} decision_reason={}",
+                decision.symbol,
+                getattr(decision, "reason", None),
+            )  # _market_data_readyを呼ぶ前にSKIP判定でstepを抜けたことを記録するログ
             logger.debug("FundingBasis: skip -> {}", decision.reason)
             return
 
@@ -478,14 +505,36 @@ class FundingBasisStrategy:
                 if holding:
                     delta = -holding.net_delta()
             if delta != 0:
-                await self._oms.submit_hedge(decision.symbol, delta)
-                holding = self._holdings.get(decision.symbol)
-                if holding:
-                    holding.perp_qty += delta
+                cycle_id = self._cycle_id_by_symbol.get(decision.symbol)
+                created = await self._oms.submit_hedge(
+                    decision.symbol,
+                    delta,
+                    meta={
+                        "intent": "rebalance",
+                        "source": "strategy",
+                        "cycle_id": cycle_id,
+                        "mode": "HEDGED",
+                        "reason": getattr(decision, "reason", None),
+                    },
+                )
+                # OMS側で skip（最小未満など）された場合は、内部holdingsも更新しない（ズレ防止）
+                if created is not None:
+                    holding = self._holdings.get(decision.symbol)
+                    if holding:
+                        holding.perp_qty += delta
+            self._log.info(
+                "strategy.step.skip_before_market_data reason=hedge_action sym={} delta_to_neutral={}",
+                decision.symbol,
+                delta,
+            )  # _market_data_readyを呼ぶ前にHEDGE処理でstepを終えていることを記録するログ
             return
 
         if decision.action is DecisionAction.CLOSE:
-            await self._close_symbol(decision.symbol)
+            await self._close_symbol(decision.symbol, source="decision_close", reason=getattr(decision, "reason", None))
+            self._log.info(
+                "strategy.step.skip_before_market_data reason=close_action sym={}",
+                decision.symbol,
+            )  # _market_data_readyを呼ぶ前にCLOSE処理でstepを終えていることを記録するログ
             return
 
         if decision.action is DecisionAction.OPEN:
@@ -498,7 +547,7 @@ class FundingBasisStrategy:
         """全シンボルの建玉を成行で解消する。"""
 
         for symbol in list(self._holdings.symbols()):
-            await self._close_symbol(symbol)
+            await self._close_symbol(symbol, source="flatten_all", reason="flatten_all")
 
     async def _open_basis_position(self, decision: Decision, *, spot_price: float, perp_price: float) -> None:
         """新規でFunding/Basisポジションを組成する。"""
@@ -509,6 +558,13 @@ class FundingBasisStrategy:
         if not ready:
             logger.info("decision.skip: market data not ready sym={} reason={}", decision.symbol, reason)
             return  # データが整っていないので発注しない（監視のみ運転）
+        self._log.info(
+            "decision.eval.start gw_type=%s gw_gw_id=%s gw_obj_id=%s",
+            type(self._primary_gateway),
+            getattr(self._primary_gateway, "gw_id", None),
+            hex(id(self._primary_gateway)),
+        )  # _market_data_readyを通過して実際にOPEN/HEDGE/CLOSE評価に入ったタイミングを記録するログ
+
 
         if self._risk_manager.disable_new_orders:
             logger.warning("FundingBasis: リスク制限により新規建てをスキップ")
@@ -560,7 +616,7 @@ class FundingBasisStrategy:
             post_only=False,
         )
         spot_req = OrderRequest(
-            symbol=decision.symbol,
+            symbol=f"{decision.symbol}_SPOT",
             side=decision.spot_side or "buy",
             type="market",
             qty=abs(spot_qty),
@@ -577,8 +633,26 @@ class FundingBasisStrategy:
             decision.spot_side,
         )
 
-        await self._oms.submit(perp_req)
-        await self._oms.submit(spot_req)
+        cycle_id = f"c_{uuid.uuid4().hex}"
+        meta_base = {
+            "intent": "open",
+            "source": "strategy",
+            "cycle_id": cycle_id,
+            "mode": "ENTERING",
+            "reason": getattr(decision, "reason", None),
+        }
+        created_perp = await self._oms.submit(perp_req, meta={**meta_base, "leg": "perp"})
+        created_spot = await self._oms.submit(spot_req, meta={**meta_base, "leg": "spot"})
+        if created_perp is None or created_spot is None:
+            logger.warning(
+                "FundingBasis: open incomplete -> skip holdings update sym={} perp_ok={} spot_ok={} cycle_id={}",
+                decision.symbol,
+                created_perp is not None,
+                created_spot is not None,
+                cycle_id,
+            )
+            return
+        self._cycle_id_by_symbol[decision.symbol] = cycle_id
         self._holdings.update_open(
             decision.symbol,
             spot_qty=signed_spot_qty,
@@ -587,42 +661,90 @@ class FundingBasisStrategy:
             perp_price=perp_price,
         )
 
-    async def _close_symbol(self, symbol: str) -> None:
+    async def _close_symbol(self, symbol: str, *, source: str = "strategy", reason: str | None = None) -> None:
         """指定シンボルの建玉を解消する。"""
 
-        holding = self._holdings.get(symbol)
-        if not holding:
-            return
+        # flatten_all と通常CLOSEが同時に走ると「同一シンボルの決済注文」が二重送信されるため排他する
+        async with self._close_guard_lock:
+            if symbol in self._closing_symbols:
+                logger.info("FundingBasis: close skip (already closing) {}", symbol)
+                return
+            holding = self._holdings.get(symbol)
+            if not holding:
+                return
+            self._closing_symbols.add(symbol)
 
         logger.info("FundingBasis: close {}", symbol)
 
-        if holding.perp_qty != 0:
-            side = "buy" if holding.perp_qty < 0 else "sell"
-            req = OrderRequest(
-                symbol=symbol,
-                side=side,
-                type="market",
-                qty=abs(holding.perp_qty),
-                time_in_force="IOC",
-                reduce_only=True,
-                post_only=False,
-            )
-            await self._oms.submit(req)
+        try:
+            cycle_id = self._cycle_id_by_symbol.get(symbol)
+            perp_ok = True
+            spot_ok = True
 
-        if holding.spot_qty != 0:
-            side = "sell" if holding.spot_qty > 0 else "buy"
-            req = OrderRequest(
-                symbol=symbol,
-                side=side,
-                type="market",
-                qty=abs(holding.spot_qty),
-                time_in_force="IOC",
-                reduce_only=True,  # 全クローズでは必ずreduce-onlyにして新規建てを防ぐ
-                post_only=False,
-            )
-            await self._oms.submit(req)
+            if holding.perp_qty != 0:
+                side = "buy" if holding.perp_qty < 0 else "sell"
+                req = OrderRequest(
+                    symbol=symbol,
+                    side=side,
+                    type="market",
+                    qty=abs(holding.perp_qty),
+                    time_in_force="IOC",
+                    reduce_only=True,
+                    post_only=False,
+                )
+                created = await self._oms.submit(
+                    req,
+                    meta={
+                        "intent": "close",
+                        "source": source,
+                        "cycle_id": cycle_id,
+                        "mode": "EXITING",
+                        "reason": reason,
+                        "leg": "perp",
+                    },
+                )
+                perp_ok = created is not None
 
-        self._holdings.clear(symbol)
+            if holding.spot_qty != 0:
+                side = "sell" if holding.spot_qty > 0 else "buy"
+                req = OrderRequest(
+                    symbol=f"{symbol}_SPOT",
+                    side=side,
+                    type="market",
+                    qty=abs(holding.spot_qty),
+                    time_in_force="IOC",
+                    reduce_only=True,  # 全クローズでは必ずreduce-onlyにして新規建てを防ぐ
+                    post_only=False,
+                )
+                created = await self._oms.submit(
+                    req,
+                    meta={
+                        "intent": "close",
+                        "source": source,
+                        "cycle_id": cycle_id,
+                        "mode": "EXITING",
+                        "reason": reason,
+                        "leg": "spot",
+                    },
+                )
+                spot_ok = created is not None
+
+            # どちらかが skip/失敗した場合は内部holdingsを消さず、次のstepで再試行できるようにする
+            if perp_ok and spot_ok:
+                self._holdings.clear(symbol)
+                self._cycle_id_by_symbol.pop(symbol, None)
+            else:
+                logger.warning(
+                    "FundingBasis: close incomplete -> keep holdings sym={} perp_ok={} spot_ok={} source={} reason={}",
+                    symbol,
+                    perp_ok,
+                    spot_ok,
+                    source,
+                    reason,
+                )
+        finally:
+            # CancelledError を含む例外時でもフラグが残らないように、await を含まない形で必ず解除する
+            self._closing_symbols.discard(symbol)
 
     def _locate_gateway_with_scale(self) -> Any | None:
         """スケール情報を持つゲートウェイを探して返す。"""
@@ -680,6 +802,40 @@ class FundingBasisStrategy:
                 )
         except Exception:
             pass
+
+        # 戦略が参照しているゲートウェイ(gw)のキャッシュ状態を詳しくログに出して、
+        # PaperExchange側の_scale_cache/_bbo_cache/_price_stateが本当に埋まっているか調べる
+        scale_cache = getattr(gw, "_scale_cache", None)
+        bbo_cache = getattr(gw, "_bbo_cache", None)
+        price_state = getattr(gw, "_price_state", None)
+
+        try:
+            logger.info(
+                "market_ready.cache_debug gw_type={} gw_gw_id={} gw_obj_id={} scale_cache_id={} scale_cache_keys={} "
+                "bbo_cache_id={} bbo_cache_keys={} price_state={}",
+                type(gw),
+                getattr(gw, "gw_id", None),
+                hex(id(gw)),
+                hex(id(scale_cache)) if scale_cache is not None else None,
+                list(scale_cache.keys()) if isinstance(scale_cache, dict) else None,
+                hex(id(bbo_cache)) if bbo_cache is not None else None,
+                list(bbo_cache.keys()) if isinstance(bbo_cache, dict) else None,
+                price_state,
+            )
+        except Exception:
+            pass
+
+        # 各キーごとに、スケール/BBO/price_stateがそろっているかを詳しくログに出す
+        if isinstance(scale_cache, dict) and isinstance(bbo_cache, dict) and isinstance(price_state, dict):
+            all_keys = sorted(set(list(scale_cache.keys()) + list(bbo_cache.keys()) + list(price_state.keys())))
+            for key in all_keys:
+                self._log.info(
+                    "market_ready.key_detail key={} has_scale={} has_bbo={} price_state={}",
+                    key,
+                    key in scale_cache,
+                    key in bbo_cache,
+                    price_state.get(key),
+                )  # 各キーについて、スケール/BBO/price_stateの有無と状態をログに出す
 
         try:
             scale_info = getattr(gw, "_scale_cache", {}).get(symbol) or {}

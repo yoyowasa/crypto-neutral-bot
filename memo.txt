@@ -166,3 +166,19 @@ Live（Mainnet）
 .\scripts\start_mainnet.ps1 --ops-check
 
 taskkill /IM python.exe /F
+
+
+目的：暗号の市場中立（ファンディング／ベーシス狙い）戦略を自動実行するための最小骨格。perp/スポットを組み合わせてデルタ中立を保ちつつ、ファンディング収益を獲りにいく設計。
+全体構成：
+bot/strategy/funding_basis/engine.py：Funding/Basis 戦略ロジック。予測APR・手数料・スリッページを考慮し、オープン/クローズ/ヘッジを決める。
+bot/oms/engine.py：OMS（注文管理）。client_id生成、発注、executionイベント取り込み、トレード/注文ログをRepoへ記録。バックテストでは紙取引の約定イベントもここで処理。
+bot/oms/fill_sim.py：PaperExchange（疑似取引所）。価格フィードから板/トレードを模倣し、即時フィルしてOMSへ execution イベントを投げる。
+bot/backtest/replay.py：1日分のティックをリプレイするバックテストランナー。価格CSV/FundingCSVを読み、PaperExchange＋Strategy＋OMS＋Repoをつないで「Backtest done: … trades=…」を出力。
+bot/data/repo.py：非同期SQLAlchemyでの永続化。TradeLog/FundingEvent/OrderLogなどをSQLite等に保存し、バックテスト集計もここから読む。
+bot/risk/guards.py：キルスイッチやクールダウンなどのリスク制御。
+bot/config/loader.py：YAML/.env/環境変数をマージしてAppConfigを返す（db_url/strategy設定など）。
+典型フロー（バックテスト）：
+tests/backtest/prepare_bitget_backtest.py で価格/ファンディングCSVを整形し、bot.backtest.replay を日付ごとに起動。
+BacktestRunner.run_one_day がティックを進め、PaperExchangeへBBO/Tradeを流す → Strategy.step() が発注判断 → OMS.submit() がPaperExchangeに発注 → _fill_now が即時フィル → OMS.on_execution_event が Repo にトレード記録。
+1日終了時に repo.list_trades()/list_funding_events() を集計し、Backtest結果をログ出力。
+実運用モードでは（実装次第で）PaperExchangeを実取引所Gatewayに置き換え、OMSがREST/WSを叩く形を想定。 Repo は取引履歴・ポジション・日次PnLの保存口座として機能。
