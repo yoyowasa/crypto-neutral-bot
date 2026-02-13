@@ -18,3 +18,7 @@ reports/*
 .vscode/
 .DS_Store
 Thumbs.db
+tests/backtest/logs/
+tests/backtest/*.png
+tests/backtest/*.db
+tests/backtest/__pycache__/
