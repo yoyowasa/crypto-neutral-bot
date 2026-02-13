@@ -105,6 +105,19 @@ class MockExchange(ExchangeGateway):
         self.placed: dict[str, _MockOrderRec] = {}
         self.canceled: set[str] = set()
         self._counter = 0
+        # OmsEngine の制約チェックを通すため、最小限のスケール情報を持たせる。
+        self._scale_cache = {
+            "BTCUSDT": {
+                "minQty_perp": 0.001,
+                "qtyStep_perp": 0.001,
+                "minNotional_perp": 1.0,
+            },
+            "ETHUSDT": {
+                "minQty_perp": 0.001,
+                "qtyStep_perp": 0.001,
+                "minNotional_perp": 1.0,
+            },
+        }
 
     async def get_balances(self):  # pragma: no cover - 未使用
         return []
@@ -133,7 +146,12 @@ class MockExchange(ExchangeGateway):
             self.canceled.add(self.placed[client_id].order_id)
 
     async def get_ticker(self, symbol: str):  # pragma: no cover - 未使用
-        return 0.0
+        # 成行再送の最小notionalチェックを通すため、シンボル別の簡易価格を返す。
+        if symbol == "BTCUSDT":
+            return 10.0
+        if symbol == "ETHUSDT":
+            return 2000.0
+        return 1.0
 
     async def get_funding_info(self, symbol: str):  # pragma: no cover - 未使用
         raise NotImplementedError

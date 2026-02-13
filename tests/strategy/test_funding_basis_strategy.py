@@ -79,17 +79,19 @@ class DummyOms:
     def __init__(self) -> None:
         self.submitted = []
         self.hedges = []
+        self._seq = 0
 
-    async def submit(self, req):
+    async def submit(self, req, *, meta=None):
         """発注内容を記録するだけの submit。"""
 
-        self.submitted.append(req)
-        return None
+        self._seq += 1
+        self.submitted.append((req, meta))
+        return types.SimpleNamespace(order_id=f"DUMMY-{self._seq}")
 
-    async def submit_hedge(self, symbol: str, delta_to_neutral: float):
+    async def submit_hedge(self, symbol: str, delta_to_neutral: float, *, meta=None):
         """ヘッジ内容を記録するだけの submit_hedge。"""
 
-        self.hedges.append((symbol, delta_to_neutral))
+        self.hedges.append((symbol, delta_to_neutral, meta))
         return None
 
 
@@ -150,8 +152,8 @@ def test_funding_basis_open_hedge_close():
 
         # OPEN では perp=SELL / spot=BUY の 2 本が出る想定
         assert len(oms.submitted) == 2
-        assert oms.submitted[0].side == "sell"
-        assert oms.submitted[1].side == "buy"
+        assert oms.submitted[0][0].side == "sell"
+        assert oms.submitted[1][0].side == "buy"
 
         # テスト用途として内部 _holdings を直接いじってデルタ乖離を作る
         holding = strategy._holdings.get("BTCUSDT")  # noqa: SLF001 - テスト用に内部状態へアクセス
